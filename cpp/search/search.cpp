@@ -327,12 +327,15 @@ bool Search::makeMove(Loc moveLoc, Player movePla) {
       //Okay, this is now our new root! Create a copy so as to keep the root out of the node table.
       const bool copySubtreeValueBias = false;
       const bool forceNonTerminal = true;
+      SearchNode* oldRootNode = rootNode;
       rootNode = new SearchNode(*child, forceNonTerminal, copySubtreeValueBias);
       //Sweep over the new root marking it as good (calling NULL function), and then delete anything unmarked.
-      //This will include the old root node and the old copy of the child that we promoted to root.
+      //This will include the old copy of the child that we promoted to root.
       applyRecursivelyAnyOrderMulithreaded({rootNode}, NULL);
       bool old = true;
       deleteAllOldOrAllNewTableNodesAndSubtreeValueBiasMulithreaded(old);
+      //The old root is not in the node table, so the sweep above doesn't free it (it leaked once per move).
+      delete oldRootNode;
     }
     else {
       clearSearch();

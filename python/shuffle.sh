@@ -46,8 +46,8 @@ echo "Beginning shuffle at" $(date "+%Y-%m-%d %H:%M:%S")
          -approx-rows-per-out-file 50000 \
          -num-processes "$NTHREADS" \
          -batch-size "$BATCHSIZE" \
-         -min-rows 150000 \
-         -keep-target-rows 2100000 \
+         -min-rows "${MIN_ROWS:-150000}" \
+         -keep-target-rows "${KEEP_TARGET_ROWS:-2100000}" \
          -only-include-md5-path-prop-lbound 0.00 \
          -only-include-md5-path-prop-ubound 0.97 \
          -output-npz \
@@ -66,7 +66,7 @@ echo "Beginning shuffle at" $(date "+%Y-%m-%d %H:%M:%S")
          -approx-rows-per-out-file 50000 \
          -num-processes "$NTHREADS" \
          -batch-size "$BATCHSIZE" \
-         -min-rows 150000 \
+         -min-rows "${MIN_ROWS:-150000}" \
          -keep-target-rows 51200 \
          -only-include-md5-path-prop-lbound 0.97 \
          -only-include-md5-path-prop-ubound 1.00 \
