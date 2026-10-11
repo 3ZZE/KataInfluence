@@ -20,6 +20,9 @@ struct PlaySettings {
   double cheapSearchProb;
   int cheapSearchVisits;
   float cheapSearchTargetWeight;
+  //Influence: cheapSearchProb to use instead during the reinforce stage, where a turn has one move per
+  //reinforcement point. Negative means same as cheapSearchProb.
+  double reinforceCheapSearchProb;
 
   //Attenuate the number of visits used in positions where one player or the other is extremely winning
   bool reduceVisits;

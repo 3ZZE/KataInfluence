@@ -239,6 +239,16 @@ void SgfNode::accumMoves(vector<Move>& moves, int xSize, int ySize) const {
   }
 }
 
+//Influence: the initial position is stored in the root node as IB[<Board::toStringSimple with '/' line delimiter>].
+//Without IB the default start of RULES.md is used. Go-style AB/AW placements are not supported.
+static Board getInfluenceInitialBoard(const SgfNode& root, int xSize, int ySize, const string& fileName) {
+  if(root.hasProperty("IB"))
+    return Board::parseBoard(xSize, ySize, root.getSingleProperty("IB"), '/');
+  if(root.hasPlacements())
+    throw StringError("AB/AW/AE placements are not supported for Influence, use IB[...] in " + fileName);
+  return Board::getDefaultStart(xSize, ySize);
+}
+
 Color SgfNode::getPLSpecifiedColor() const {
   if(!hasProperty("PL"))
     return C_EMPTY;
@@ -556,11 +566,12 @@ void Sgf::iterAllUniquePositions(
   int xSize = size.x;
   int ySize = size.y;
 
-  Board board(xSize,ySize);
-  Player nextPla = nodes.size() > 0 ? nodes[0]->getPLSpecifiedColor() : C_EMPTY;
-  if(nextPla == C_EMPTY)
-    nextPla = C_BLACK;
+  checkNonEmpty(nodes);
+  Board board = getInfluenceInitialBoard(*nodes[0], xSize, ySize, fileName);
+  Player nextPla = board.nextPla;
   Rules rules = Rules::getTrompTaylorish();
+  if(hasRules())
+    rules = getRulesOrFail();
   BoardHistory hist(board,nextPla,rules);
 
   PositionSample sampleBuf;
@@ -588,48 +599,11 @@ void Sgf::iterAllUniquePositionsHelper(
     if(nodes[i]->hasProperty("C"))
       comments = nodes[i]->getSingleProperty("C");
 
-    //Handle placements
-    if(nodes[i]->hasPlacements()) {
-      buf.clear();
-      nodes[i]->accumPlacements(buf,xSize,ySize);
-      if(buf.size() > 0) {
-        int netStonesAdded = 0;
-        for(size_t j = 0; j<buf.size(); j++) {
-          if(board.colors[buf[j].loc] != C_EMPTY && buf[j].pla == C_EMPTY)
-            netStonesAdded--;
-          if(board.colors[buf[j].loc] == C_EMPTY && buf[j].pla != C_EMPTY)
-            netStonesAdded++;
-        }
-        bool suc = board.setStones(buf);
-        if(!suc) {
-          ostringstream trace;
-          for(size_t s = 0; s < variationTraceNodesBranch.size(); s++) {
-            trace << "forward " << variationTraceNodesBranch[s].first << " ";
-            trace << "branch " << variationTraceNodesBranch[s].second << " ";
-          }
-          trace << "forward " << i;
-
-          throw StringError(
-            "Illegal placements in " + fileName + " SGF trace (branches 0-indexed): " + trace.str()
-          );
-        }
-
-        //Clear history any time placements happen, but make sure we track the initial turn number.
-        initialTurnNumber += (int)hist.moveHistory.size();
-
-        //If stones were net added, count each such stone as half of an initial turn.
-        //Sort of hacky, but improves the correlation between initial turn and how full the board is compared
-        //to not doing it.
-        if(netStonesAdded > 0)
-          initialTurnNumber += (netStonesAdded+1)/2;
-        //Also make sure the turn number is at least as large as the number of stones in the board
-        if(board.numStonesOnBoard() > initialTurnNumber)
-          initialTurnNumber = board.numStonesOnBoard();
-
-        hist.clear(board,nextPla,rules);
-      }
+    //Handle placements, only the initial position in the root node is supported
+    if(nodes[i]->hasPlacements() || (i > 0 && nodes[i]->hasProperty("IB")))
+      throw StringError("Placements after the root are not supported for Influence in " + fileName);
+    if(i == 0)
       samplePositionIfUniqueHelper(board,hist,nextPla,sampleBuf,initialTurnNumber,uniqueHashes,hashComments,hashParent,allowGameOver,comments,f);
-    }
 
     //Handle actual moves
     buf.clear();
@@ -656,7 +630,7 @@ void Sgf::iterAllUniquePositionsHelper(
       }
       if(hist.moveHistory.size() > 0x3FFFFFFF)
         throw StringError("too many moves in sgf");
-      nextPla = getOpp(buf[j].pla);
+      nextPla = board.nextPla;
       samplePositionIfUniqueHelper(board,hist,nextPla,sampleBuf,initialTurnNumber,uniqueHashes,hashComments,hashParent,allowGameOver,comments,f);
     }
   }
@@ -867,17 +841,26 @@ Sgf::PositionSample Sgf::PositionSample::ofJsonLine(const string& s) {
 
 Sgf::PositionSample Sgf::PositionSample::getColorFlipped() const {
   Sgf::PositionSample other = *this;
-  Board newBoard(other.board.x_size,other.board.y_size);
-  for(int y = 0; y < other.board.y_size; y++) {
-    for(int x = 0; x < other.board.x_size; x++) {
-      Loc loc = Location::getLoc(x,y,other.board.x_size);
-      if(other.board.colors[loc] == C_BLACK || other.board.colors[loc] == C_WHITE) {
-        bool suc = newBoard.setStone(loc, getOpp(other.board.colors[loc]));
-        assert(suc);
-        (void)suc;
+  const Board& b = other.board;
+  Board newBoard(b.x_size,b.y_size);
+  for(int y = 0; y < b.y_size; y++) {
+    for(int x = 0; x < b.x_size; x++) {
+      Loc loc = Location::getLoc(x,y,b.x_size);
+      bool suc = true;
+      if(b.colors[loc] == C_WALL)
+        suc = newBoard.setWall(loc, true);
+      else {
+        suc = suc && newBoard.setBig(loc, b.isBig(loc));
+        if(b.colors[loc] == C_BLACK || b.colors[loc] == C_WHITE)
+          suc = suc && newBoard.setCell(loc, getOpp(b.colors[loc]), b.strength[loc]);
       }
+      assert(suc);
+      (void)suc;
     }
   }
+  bool suc = newBoard.setTurnState(getOpp(b.nextPla), b.stage, b.selectedSrc, b.reinforceLeft, b.turnNumber);
+  assert(suc);
+  (void)suc;
   other.board = newBoard;
   other.nextPla = getOpp(other.nextPla);
   for(int i = 0; i<other.moves.size(); i++)
@@ -1337,28 +1320,8 @@ Rules CompactSgf::getRulesOrWarn(const Rules& defaultRules, std::function<void(c
 
 
 void CompactSgf::setupInitialBoardAndHist(const Rules& initialRules, Board& board, Player& nextPla, BoardHistory& hist) const {
-  Color plPlayer = rootNode.getPLSpecifiedColor();
-  if(plPlayer == P_BLACK || plPlayer == P_WHITE)
-    nextPla = plPlayer;
-  else {
-    bool hasBlack = false;
-    bool allBlack = true;
-    for(int i = 0; i<placements.size(); i++) {
-      if(placements[i].pla == P_BLACK)
-        hasBlack = true;
-      else
-        allBlack = false;
-    }
-    if(hasBlack && !allBlack)
-      nextPla = P_WHITE;
-    else
-      nextPla = P_BLACK;
-  }
-
-  board = Board(xSize,ySize);
-  bool suc = board.setStones(placements);
-  if(!suc)
-    throw StringError("setupInitialBoardAndHist: initial board position contains invalid stones or zero-liberty stones");
+  board = getInfluenceInitialBoard(rootNode, xSize, ySize, fileName);
+  nextPla = board.nextPla;
   hist = BoardHistory(board,nextPla,initialRules);
 }
 
@@ -1373,7 +1336,7 @@ void CompactSgf::playMovesAssumeLegal(Board& board, Player& nextPla, BoardHistor
 
   for(int64_t i = 0; i<turnIdx; i++) {
     hist.makeBoardMoveAssumeLegal(board,moves[i].loc,moves[i].pla);
-    nextPla = getOpp(moves[i].pla);
+    nextPla = board.nextPla;
   }
 }
 
@@ -1390,7 +1353,7 @@ void CompactSgf::playMovesTolerant(Board& board, Player& nextPla, BoardHistory& 
     bool suc = hist.makeBoardMoveTolerant(board,moves[i].loc,moves[i].pla);
     if(!suc)
       throw StringError("Illegal move in " + fileName + " turn " + Global::int64ToString(i) + " move " + Location::toString(moves[i].loc, board.x_size, board.y_size));
-    nextPla = getOpp(moves[i].pla);
+    nextPla = board.nextPla;
   }
 }
 
@@ -1456,37 +1419,9 @@ void WriteSgf::writeSgf(
   out << "RU[" << (tryNicerRulesString ? rules.toStringMaybeNice() : rules.toString()) << "]";
   printGameResult(out,endHist);
 
-  bool hasAB = false;
-  for(int y = 0; y<ySize; y++) {
-    for(int x = 0; x<xSize; x++) {
-      Loc loc = Location::getLoc(x,y,xSize);
-      if(initialBoard.colors[loc] == C_BLACK) {
-        if(!hasAB) {
-          out << "AB";
-          hasAB = true;
-        }
-        out << "[";
-        writeSgfLoc(out,loc,xSize,ySize);
-        out << "]";
-      }
-    }
-  }
-
-  bool hasAW = false;
-  for(int y = 0; y<ySize; y++) {
-    for(int x = 0; x<xSize; x++) {
-      Loc loc = Location::getLoc(x,y,xSize);
-      if(initialBoard.colors[loc] == C_WHITE) {
-        if(!hasAW) {
-          out << "AW";
-          hasAW = true;
-        }
-        out << "[";
-        writeSgfLoc(out,loc,xSize,ySize);
-        out << "]";
-      }
-    }
-  }
+  out << "PL[" << (endHist.initialPla == P_BLACK ? "B" : "W") << "]";
+  //Influence initial position, see getInfluenceInitialBoard
+  out << "IB[" << Board::toStringSimple(initialBoard, '/') << "]";
 
   size_t startTurnIdx = 0;
   if(gameData != NULL) {

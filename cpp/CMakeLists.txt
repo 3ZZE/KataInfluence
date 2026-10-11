@@ -229,10 +229,10 @@ add_executable(katago
   ${GIT_HEADER_FILE_ALWAYS_UPDATED}
   tests/testcommon.cpp
   tests/testnnevalcanary.cpp
+  tests/testinfluence.cpp
   distributed/client.cpp
   command/commandline.cpp
   command/analysis.cpp
-  command/balancedopenings.cpp
   command/benchmark.cpp
   command/contribute.cpp
   command/evalsgf.cpp
@@ -244,7 +244,6 @@ add_executable(katago
   command/matchauto.cpp
   command/misc.cpp
   command/runtests.cpp
-  command/sandbox.cpp
   command/selfplay.cpp
   command/distill.cpp
   command/tune.cpp

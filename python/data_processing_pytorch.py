@@ -61,7 +61,9 @@ def read_npz_training_data(
 
 
             if randomize_symmetries:
-                symm = int(rand.integers(0,8))
+                # Influence is played on a hex grid with neighbours (0,+-1),(+-1,0),(1,1),(-1,-1).
+                # Only identity, rotate 180 (2), transpose (4) and anti-transpose (6) preserve it.
+                symm = 2 * int(rand.integers(0,4))
                 batch_binaryInputNCHW = apply_symmetry(batch_binaryInputNCHW, symm)
                 batch_policyTargetsNCMove = apply_symmetry_policy(batch_policyTargetsNCMove, symm, pos_len)
                 batch_valueTargetsNCHW = apply_symmetry(batch_valueTargetsNCHW, symm)

@@ -455,15 +455,7 @@ string GTPConfig::makeConfig(
     config.replace(pos, key.size(), replacement);
   };
 
-  if(rules.basicRule == Rules::BASICRULE_FREESTYLE)
-    replace("$$BASIC_RULE", "basicRule = FREESTYLE  # options: FREESTYLE, STANDARD, RENJU");
-  else if(rules.basicRule == Rules::BASICRULE_STANDARD)
-    replace("$$BASIC_RULE", "basicRule = STANDARD  # options: FREESTYLE, STANDARD, RENJU");
-  else if(rules.basicRule == Rules::BASICRULE_RENJU)
-    replace("$$BASIC_RULE", "basicRule = RENJU  # options: FREESTYLE, STANDARD, RENJU");
-  else {
-    ASSERT_UNREACHABLE;
-  }
+  replace("$$BASIC_RULE", "maxMoves = " + Global::intToString(rules.maxMoves) + "  # Max player turns before a draw, 0 = unlimited");
 
 
   if(maxVisits < ((int64_t)1 << 50)) replace("$$MAX_VISITS", "maxVisits = " + Global::int64ToString(maxVisits));

@@ -197,7 +197,8 @@ getSymmetryDifference(const Board& board, const Board& other, int symmetry, doub
       Loc loc = Location::getLoc(x, y, board.x_size);
       Loc symLoc = SymmetryHelpers::getSymLoc(x, y, board, symmetry);
       // Difference!
-      if(board.colors[loc] != other.colors[symLoc]) {
+      if(board.colors[loc] != other.colors[symLoc] || board.strength[loc] != other.strength[symLoc] ||
+         board.cap[loc] != other.cap[symLoc]) {
         // One of them was empty, the other was a stone
         if(board.colors[loc] == C_EMPTY || other.colors[symLoc] == C_EMPTY)
           thisDifference += 1.0;
@@ -247,9 +248,9 @@ static void copyWithSymmetry(
   bool useNHWC,
   int symmetry,
   bool reverse) {
-  bool transpose = (symmetry & 0x4) != 0 && hSize == wSize;
-  bool flipX = (symmetry & 0x2) != 0;
-  bool flipY = (symmetry & 0x1) != 0;
+  bool transpose = SymmetryHelpers::isTranspose(symmetry) && hSize == wSize;
+  bool flipX = SymmetryHelpers::isFlipX(symmetry);
+  bool flipY = SymmetryHelpers::isFlipY(symmetry);
   if(transpose && !reverse)
     std::swap(flipX, flipY);
   if(useNHWC) {
@@ -344,17 +345,12 @@ void SymmetryHelpers::copyOutputsWithSymmetry(
   copyWithSymmetry(src, dst, nSize, hSize, wSize, 1, false, symmetry, true);
 }
 
+//Rotation by 180 and transpose commute and are involutions, so the group is Z2 x Z2.
 int SymmetryHelpers::invert(int symmetry) {
-  if(symmetry == 5)
-    return 6;
-  if(symmetry == 6)
-    return 5;
   return symmetry;
 }
 
 int SymmetryHelpers::compose(int firstSymmetry, int nextSymmetry) {
-  if(isTranspose(firstSymmetry))
-    nextSymmetry = (nextSymmetry & 0x4) | ((nextSymmetry & 0x2) >> 1) | ((nextSymmetry & 0x1) << 1);
   return firstSymmetry ^ nextSymmetry;
 }
 
@@ -363,9 +359,9 @@ int SymmetryHelpers::compose(int firstSymmetry, int nextSymmetry, int nextNextSy
 }
 
 Loc SymmetryHelpers::getSymLoc(int x, int y, int xSize, int ySize, int symmetry) {
-  bool transpose = (symmetry & 0x4) != 0;
-  bool flipX = (symmetry & 0x2) != 0;
-  bool flipY = (symmetry & 0x1) != 0;
+  bool transpose = isTranspose(symmetry);
+  bool flipX = isFlipX(symmetry);
+  bool flipY = isFlipY(symmetry);
   if(flipX) {
     x = xSize - x - 1;
   }
@@ -395,9 +391,9 @@ Loc SymmetryHelpers::getSymLoc(Loc loc, int xSize, int ySize, int symmetry) {
 }
 
 Board SymmetryHelpers::getSymBoard(const Board& board, int symmetry) {
-  bool transpose = (symmetry & 0x4) != 0;
-  bool flipX = (symmetry & 0x2) != 0;
-  bool flipY = (symmetry & 0x1) != 0;
+  bool transpose = isTranspose(symmetry);
+  bool flipX = isFlipX(symmetry);
+  bool flipY = isFlipY(symmetry);
   Board symBoard(transpose ? board.y_size : board.x_size, transpose ? board.x_size : board.y_size);
   for(int y = 0; y < board.y_size; y++) {
     for(int x = 0; x < board.x_size; x++) {
@@ -407,11 +403,22 @@ Board SymmetryHelpers::getSymBoard(const Board& board, int symmetry) {
       if(transpose)
         std::swap(symX, symY);
       Loc symLoc = Location::getLoc(symX, symY, symBoard.x_size);
-      bool suc = symBoard.setStone(symLoc, board.colors[loc]);
+      bool suc = true;
+      if(board.colors[loc] == C_WALL)
+        suc = symBoard.setWall(symLoc, true);
+      else {
+        suc = suc && symBoard.setBig(symLoc, board.isBig(loc));
+        suc = suc && symBoard.setCell(symLoc, board.colors[loc], board.strength[loc]);
+      }
       assert(suc);
       (void)suc;
     }
   }
+  bool suc = symBoard.setTurnState(
+    board.nextPla, board.stage, getSymLoc(board.selectedSrc, board, symmetry), board.reinforceLeft, board.turnNumber);
+  assert(suc);
+  (void)suc;
+  symBoard.movenum = board.movenum;
   return symBoard;
 }
 
@@ -436,11 +443,15 @@ void SymmetryHelpers::markDuplicateMoveLocs(
       continue;
 
     bool isBoardSym = true;
-    for(int y = 0; y < board.y_size; y++) {
+    //The selected attack source is part of the position
+    if(board.selectedSrc != Board::NULL_LOC && getSymLoc(board.selectedSrc, board, symmetry) != board.selectedSrc)
+      isBoardSym = false;
+    for(int y = 0; y < board.y_size && isBoardSym; y++) {
       for(int x = 0; x < board.x_size; x++) {
         Loc loc = Location::getLoc(x, y, board.x_size);
         Loc symLoc = getSymLoc(x, y, board, symmetry);
-        bool isStoneSym = (board.colors[loc] == board.colors[symLoc]);
+        bool isStoneSym = board.colors[loc] == board.colors[symLoc] && board.strength[loc] == board.strength[symLoc] &&
+                          board.cap[loc] == board.cap[symLoc];
         if(!isStoneSym) {
           isBoardSym = false;
           break;
@@ -530,8 +541,31 @@ Hash128 NNInputs::getHash(
 }
 
 //===========================================================================================
-// INPUTSVERSION 102
+// INPUTSVERSION 102: Influence
 //===========================================================================================
+// All spatial features are binary (training data stores them bit-packed).
+// Spatial, from the perspective of nextPlayer ("own") vs the opponent:
+//  0     cell (not a wall)
+//  1     big cell (cap 12)
+//  2-13  own cell with strength 1..12
+//  14-25 opp cell with strength 1..12
+//  26    own cell at its cap
+//  27    opp cell at its cap
+//  28    selected attack source (STAGE_ATTACK_TARGET)
+//  29    legal non-pass moves for the current stage
+//  30    own cells that could attack now (strength >= 2 and a non-own neighbour)
+//  31    opp cells that could attack (threats for the opponent's next turn)
+// Global:
+//  0-2   stage one-hot (attack-select, attack-target, reinforce)
+//  3     reinforcement points left / 32
+//  4     reinforcement points left / own reinforcement capacity
+//  5,6   own / opp area / number of cells
+//  7,8   own / opp value / (8 * number of cells)
+//  9,10  own / opp area / 32
+//  11    move limit enabled
+//  12    turns left / move limit
+//  13    exp(-turns left / 20)
+//  rest  0
 
 void NNInputs::fillRowV102(
   const Board& board,
@@ -543,111 +577,99 @@ void NNInputs::fillRowV102(
   bool useNHWC,
   float* rowBin,
   float* rowGlobal) {
+  (void)nnInputParams;
   assert(nnXLen <= NNPos::MAX_BOARD_LEN);
   assert(nnYLen <= NNPos::MAX_BOARD_LEN);
   assert(board.x_size <= nnXLen);
   assert(board.y_size <= nnYLen);
-  std::fill(rowBin, rowBin + NUM_FEATURES_SPATIAL_V102 * nnXLen * nnYLen, false);
+  std::fill(rowBin, rowBin + NUM_FEATURES_SPATIAL_V102 * nnXLen * nnYLen, 0.0f);
   std::fill(rowGlobal, rowGlobal + NUM_FEATURES_GLOBAL_V102, 0.0f);
-  throw StringError("V102 input is not implemented until now");
+
+  Player pla = nextPlayer;
+  Player opp = getOpp(pla);
+  int xSize = board.x_size;
+  int ySize = board.y_size;
+  bool isPlaToMove = board.nextPla == pla;
+
+  int featureStride, posStride;
+  if(useNHWC) {
+    featureStride = 1;
+    posStride = NUM_FEATURES_SPATIAL_V102;
+  } else {
+    featureStride = nnXLen * nnYLen;
+    posStride = 1;
+  }
+
+  int numCells = 0;
+  for(int y = 0; y < ySize; y++) {
+    for(int x = 0; x < xSize; x++) {
+      Loc loc = Location::getLoc(x, y, xSize);
+      Color c = board.colors[loc];
+      if(c == C_WALL)
+        continue;
+      numCells++;
+      int pos = NNPos::xyToPos(x, y, nnXLen);
+      float* p = rowBin + pos * posStride;
+      p[0 * featureStride] = 1.0f;
+      if(board.isBig(loc))
+        p[1 * featureStride] = 1.0f;
+      int str = board.strength[loc];
+      if(c == pla) {
+        p[(1 + str) * featureStride] = 1.0f;
+        if(str >= board.cap[loc])
+          p[26 * featureStride] = 1.0f;
+        if(board.canAttackFrom(loc, pla))
+          p[30 * featureStride] = 1.0f;
+      } else if(c == opp) {
+        p[(13 + str) * featureStride] = 1.0f;
+        if(str >= board.cap[loc])
+          p[27 * featureStride] = 1.0f;
+        if(board.canAttackFrom(loc, opp))
+          p[31 * featureStride] = 1.0f;
+      }
+      if(loc == board.selectedSrc)
+        p[28 * featureStride] = 1.0f;
+      if(isPlaToMove && board.isLegal(loc, pla))
+        p[29 * featureStride] = 1.0f;
+    }
+  }
+  if(numCells <= 0)
+    numCells = 1;
+
+  rowGlobal[board.stage] = 1.0f;
+  if(board.stage == Board::STAGE_REINFORCE) {
+    rowGlobal[3] = board.reinforceLeft / 32.0f;
+    int capacity = board.getCapacity(pla);
+    rowGlobal[4] = capacity > 0 ? std::min(1.0f, (float)board.reinforceLeft / capacity) : 1.0f;
+  }
+  rowGlobal[5] = (float)board.getArea(pla) / numCells;
+  rowGlobal[6] = (float)board.getArea(opp) / numCells;
+  rowGlobal[7] = (float)board.getValue(pla) / (Board::SMALL_CAP * numCells);
+  rowGlobal[8] = (float)board.getValue(opp) / (Board::SMALL_CAP * numCells);
+  rowGlobal[9] = board.getArea(pla) / 32.0f;
+  rowGlobal[10] = board.getArea(opp) / 32.0f;
+  if(hist.rules.maxMoves > 0) {
+    int turnsLeft = std::max(0, hist.rules.maxMoves - board.turnNumber);
+    rowGlobal[11] = 1.0f;
+    rowGlobal[12] = (float)turnsLeft / hist.rules.maxMoves;
+    rowGlobal[13] = (float)exp(-turnsLeft / 20.0);
+  }
 }
 
 void NNInputs::fillRowV7(
     const Board& board, const BoardHistory& boardHistory, Player nextPlayer,
     const MiscNNInputParams& nnInputParams, int nnXLen, int nnYLen, bool useNHWC, float* rowBin, float* rowGlobal
 ) {
-
-  // throw StringError("V7 input is not implemented until now");
-  assert(nnXLen <= NNPos::MAX_BOARD_LEN);
-  assert(nnYLen <= NNPos::MAX_BOARD_LEN);
-  assert(board.x_size <= nnXLen);
-  assert(board.y_size <= nnYLen);
-  std::fill(rowBin, rowBin + NUM_FEATURES_SPATIAL_V7 * nnXLen * nnYLen, 0.0f);
-  std::fill(rowGlobal, rowGlobal + NUM_FEATURES_GLOBAL_V7, 0.0f);
-
-  Player pla = nextPlayer;
-  Player opp = getOpp(pla);
-  int xSize = board.x_size;
-  int ySize = board.y_size;
-
-  int featureStride, posStride;
-  if(useNHWC) {
-    featureStride = 1;
-    posStride = NUM_FEATURES_SPATIAL_V7;
-  } else {
-    featureStride = nnXLen * nnYLen;
-    posStride = 1;
-  }
-
-  for(int y = 0; y < ySize; y++) {
-    for(int x = 0; x < xSize; x++) {
-      int pos = NNPos::xyToPos(x, y, nnXLen);
-      Loc loc = Location::getLoc(x, y, xSize);
-
-      rowBin[pos * posStride + 0 * featureStride] = 1.0f;  // feature 0: on-board
-
-      Color stone = board.colors[loc];
-      if(stone == pla) {
-        rowBin[pos * posStride + 1 * featureStride] = 1.0f;  // feature 1: own stone
-      } else if(stone == opp) {
-        rowBin[pos * posStride + 2 * featureStride] = 1.0f;  // feature 2: opp stone
-      } else if(stone == pla + 3) {
-        rowBin[pos * posStride + 3 * featureStride] = 1.0f;  // feature 3: own captured
-      } else if(stone == opp + 3) {
-        rowBin[pos * posStride + 4 * featureStride] = 1.0f;  // feature 4: opp captured
-      }
-    }
-  }
-
-  rowGlobal[0] = nextPlayer == C_WHITE ? 1.0f : 0.0f;  // side to move
+  (void)board; (void)boardHistory; (void)nextPlayer; (void)nnInputParams;
+  (void)nnXLen; (void)nnYLen; (void)useNHWC; (void)rowBin; (void)rowGlobal;
+  throw StringError("Influence only supports inputs version 102 (model version 103)");
 }
 
 void NNInputs::fillRowV101(
     const Board& board, const BoardHistory& boardHistory, Player nextPlayer,
     const MiscNNInputParams& nnInputParams, int nnXLen, int nnYLen, bool useNHWC, float* rowBin, float* rowGlobal
 ) {
-
-  // throw StringError("V101 input is not implemented until now");
-  assert(nnXLen <= NNPos::MAX_BOARD_LEN);
-  assert(nnYLen <= NNPos::MAX_BOARD_LEN);
-  assert(board.x_size <= nnXLen);
-  assert(board.y_size <= nnYLen);
-  std::fill(rowBin, rowBin + NUM_FEATURES_SPATIAL_V101 * nnXLen * nnYLen, 0.0f);
-  std::fill(rowGlobal, rowGlobal + NUM_FEATURES_GLOBAL_V101, 0.0f);
-
-  Player pla = nextPlayer;
-  Player opp = getOpp(pla);
-  int xSize = board.x_size;
-  int ySize = board.y_size;
-
-  int featureStride, posStride;
-  if(useNHWC) {
-    featureStride = 1;
-    posStride = NUM_FEATURES_SPATIAL_V101;
-  } else {
-    featureStride = nnXLen * nnYLen;
-    posStride = 1;
-  }
-
-  for(int y = 0; y < ySize; y++) {
-    for(int x = 0; x < xSize; x++) {
-      int pos = NNPos::xyToPos(x, y, nnXLen);
-      Loc loc = Location::getLoc(x, y, xSize);
-
-      rowBin[pos * posStride + 0 * featureStride] = 1.0f;  // feature 0: on-board
-
-      Color stone = board.colors[loc];
-      if(stone == pla) {
-        rowBin[pos * posStride + 1 * featureStride] = 1.0f;  // feature 1: own stone
-      } else if(stone == opp) {
-        rowBin[pos * posStride + 2 * featureStride] = 1.0f;  // feature 2: opp stone
-      } else if(stone == pla + 3) {
-        rowBin[pos * posStride + 3 * featureStride] = 1.0f;  // feature 3: own captured
-      } else if(stone == opp + 3) {
-        rowBin[pos * posStride + 4 * featureStride] = 1.0f;  // feature 4: opp captured
-      }
-    }
-  }
-
-  rowGlobal[0] = nextPlayer == C_WHITE ? 1.0f : 0.0f;  // side to move
+  (void)board; (void)boardHistory; (void)nextPlayer; (void)nnInputParams;
+  (void)nnXLen; (void)nnYLen; (void)useNHWC; (void)rowBin; (void)rowGlobal;
+  throw StringError("Influence only supports inputs version 102 (model version 103)");
 }

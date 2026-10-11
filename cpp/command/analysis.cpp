@@ -679,10 +679,18 @@ int MainCmds::analysis(const vector<string>& args) {
         return true;
       };
 
-      vector<Move> placements;
       if(input.find("initialStones") != input.end()) {
-        if(!parseBoardMoves(input, "initialStones", placements, false))
+        reportErrorForId(rbase.id, "initialStones", "initialStones is not supported for Influence, use initialBoard");
+        continue;
+      }
+      //Influence: initial position in Board::parseBoard text format, rows separated by '/'
+      string initialBoardStr;
+      if(input.find("initialBoard") != input.end()) {
+        if(!input["initialBoard"].is_string()) {
+          reportErrorForId(rbase.id, "initialBoard", "Must be a string");
           continue;
+        }
+        initialBoardStr = input["initialBoard"].get<string>();
       }
       vector<Move> moveHistory;
       if(input.find("moves") != input.end()) {
@@ -945,17 +953,23 @@ int MainCmds::analysis(const vector<string>& args) {
       }
 
 
-      Board board(boardXSize,boardYSize);
-      for(int i = 0; i<placements.size(); i++) {
-        board.setStone(placements[i].loc,placements[i].pla);
+      Board board;
+      try {
+        if(initialBoardStr.size() > 0)
+          board = Board::parseBoard(boardXSize,boardYSize,initialBoardStr,'/');
+        else
+          board = Board::getDefaultStart(boardXSize,boardYSize);
+      }
+      catch(const StringError& e) {
+        reportErrorForId(rbase.id, "initialBoard", string("Could not parse initial board: ") + e.what());
+        continue;
       }
 
-      if(initialPlayer == C_EMPTY) {
-        if(moveHistory.size() > 0)
-          initialPlayer = moveHistory[0].pla;
-        else
-          initialPlayer = P_BLACK;
+      if(initialPlayer != C_EMPTY && initialPlayer != board.nextPla) {
+        reportErrorForId(rbase.id, "initialPlayer", "initialPlayer does not match the player to move of the initial board");
+        continue;
       }
+      initialPlayer = board.nextPla;
 
       bool rulesWereSupported;
       Rules supportedRules = nnEval->getSupportedRules(rules,rulesWereSupported);
@@ -1007,17 +1021,13 @@ int MainCmds::analysis(const vector<string>& args) {
 
         Player movePla = moveHistory[turnNumber].pla;
         Loc moveLoc = moveHistory[turnNumber].loc;
-        if(movePla != nextPla) {
-          hist.clear(board,movePla,rules);
-        }
-
-        bool suc = hist.makeBoardMoveTolerant(board,moveLoc,movePla);
+        bool suc = movePla == nextPla && hist.makeBoardMoveTolerant(board,moveLoc,movePla);
         if(!suc) {
           reportErrorForId(rbase.id, "moves", "Illegal move " + Global::intToString(turnNumber) + ": " + Location::toString(moveLoc,board));
           foundIllegalMove = true;
           break;
         }
-        nextPla = getOpp(movePla);
+        nextPla = board.nextPla;
       }
 
       if(foundIllegalMove) {

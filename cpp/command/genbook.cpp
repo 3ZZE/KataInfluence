@@ -125,7 +125,7 @@ static void playMoveLocSequence(Board& board, Player& nextPlayer, vector<Loc> lo
       throw StringError("Illegal moves in maybeParseInitialMoveBonus");
     if(loc != Board::NULL_LOC)
       board.playMoveAssumeLegal(loc, nextPlayer);
-    nextPlayer = getOpp(nextPlayer);
+    nextPlayer = board.nextPla;
   }
 }
 
@@ -163,7 +163,7 @@ static void maybeParseInitialMoveBonus(
             "Adding bonus " + Global::doubleToString(ret * bonusScale) + " to hash " + hashRet.toString());
         }
       }
-      pla = getOpp(pla);
+      pla = board.nextPla;
     }
   }
 }
@@ -283,8 +283,8 @@ int MainCmds::genbook(const vector<string>& args) {
   Board bonusInitialBoard;
   Player bonusInitialPla;
 
-  bonusInitialBoard = Board(boardSizeX, boardSizeY);
-  bonusInitialPla = P_BLACK; 
+  bonusInitialBoard = Board::getDefaultStart(boardSizeX, boardSizeY);
+  bonusInitialPla = bonusInitialBoard.nextPla;
   if(rootBoardSequence != "") {
     vector<Loc> rootBoardLocSeq = Location::parseSequenceGom(rootBoardSequence, bonusInitialBoard);
     playMoveLocSequence(bonusInitialBoard, bonusInitialPla, rootBoardLocSeq);
@@ -769,7 +769,7 @@ int MainCmds::genbook(const vector<string>& args) {
       assert(node.isMoveInBook(moveLoc));
       node = node.playMove(board,hist,moveLoc);
       assert(!node.isNull());
-      pla = getOpp(pla);
+      pla = board.nextPla;
     }
   };
 

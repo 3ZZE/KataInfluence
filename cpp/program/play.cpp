@@ -42,27 +42,12 @@ GameInitializer::GameInitializer(ConfigParser& cfg, Logger& logger, const string
 }
 
 void GameInitializer::initShared(ConfigParser& cfg, Logger& logger) {
-  allowedBasicRuleStrs = cfg.getStrings("basicRules", Rules::basicRuleStrings());
-
-  for(size_t i = 0; i < allowedBasicRuleStrs.size(); i++)
-    allowedBasicRules.push_back(Rules::parseBasicRule(allowedBasicRuleStrs[i]));
-
-  if(allowedBasicRules.size() <= 0)
-    throw IOError("basicRules must have at least one value in " + cfg.getFileName());
-
-  allowedVCNRuleStrs = cfg.getStrings("VCNRules", Rules::VCNRuleStrings());
-
-  for(size_t i = 0; i < allowedVCNRuleStrs.size(); i++)
-    allowedVCNRules.push_back(Rules::parseVCNRule(allowedVCNRuleStrs[i]));
-
-  if(allowedVCNRules.size() <= 0)
-    throw IOError("VCNRules must have at least one value in " + cfg.getFileName());
-
-  allowedFirstPassWinRules = cfg.getBools("firstPassWinRules");
-  if(allowedFirstPassWinRules.size() <= 0)
-    throw IOError("firstPassWinRules must have at least one value in " + cfg.getFileName());
-
-  moveLimitProb = cfg.contains("moveLimitProb") ? cfg.getDouble("moveLimitProb", 0.0, 1.0) : 0.0;
+  //Move limit in player turns, the game is a draw when it is reached
+  maxTurns = cfg.contains("maxTurns") ? cfg.getInt("maxTurns", 0, 100000) : 200;
+  //Starting position variety, see RandomOpening::initStartPosition
+  randomStartProb = cfg.contains("randomStartProb") ? cfg.getDouble("randomStartProb", 0.0, 1.0) : 0.0;
+  randomWallsProb = cfg.contains("randomWallsProb") ? cfg.getDouble("randomWallsProb", 0.0, 1.0) : 0.0;
+  randomWallsMaxDensity = cfg.contains("randomWallsMaxDensity") ? cfg.getDouble("randomWallsMaxDensity", 0.0, 0.5) : 0.15;
 
 
   allowedBSizes = cfg.getInts("bSizes", 2, Board::MAX_LEN);
@@ -311,13 +296,7 @@ Rules GameInitializer::createRules() {
 
 Rules GameInitializer::createRulesUnsynchronized() {
   Rules rules;
-  rules.basicRule = allowedBasicRules[rand.nextUInt(allowedBasicRules.size())];
-  rules.VCNRule = allowedVCNRules[rand.nextUInt(allowedVCNRules.size())];
-  if(rules.VCNRule == Rules::VCNRULE_NOVC)
-    rules.firstPassWin = allowedFirstPassWinRules[rand.nextUInt(allowedFirstPassWinRules.size())];
-  else
-    rules.firstPassWin = false;
-
+  rules.maxMoves = maxTurns;
   return rules;
 }
 
@@ -384,7 +363,7 @@ void GameInitializer::createGameSharedUnsynchronized(
         break;
       }
       hist.makeBoardMoveAssumeLegal(board,startPos.moves[i].loc,startPos.moves[i].pla);
-      pla = getOpp(startPos.moves[i].pla);
+      pla = board.nextPla;
     }
 
     otherGameProps.isSgfPos = hintLoc == Board::NULL_LOC;
@@ -397,16 +376,8 @@ void GameInitializer::createGameSharedUnsynchronized(
   else {
     int xSize = allowedBSizes[xSizeIdx];
     int ySize = allowedBSizes[ySizeIdx];
-    if(!rules.firstPassWin && rules.VCNRule == Rules::VCNRULE_NOVC && rand.nextBool(moveLimitProb)) {
-      int maxMoves = rand.nextExponential() * 30 + 30 - rand.nextExponential() * 5;
-      if(maxMoves > xSize * ySize - 5)
-        maxMoves = 0;
-      if(maxMoves < 10)
-        maxMoves = 0;
-      rules.maxMoves = maxMoves;
-    }
-    board = Board(xSize,ySize);
-    pla = P_BLACK;
+    board = RandomOpening::initStartPosition(xSize, ySize, rand, randomStartProb, randomWallsProb, randomWallsMaxDensity);
+    pla = board.nextPla;
     hist.clear(board,pla,rules);
 
     otherGameProps.isSgfPos = false;
@@ -839,8 +810,11 @@ static void recordTreePositionsRec(
   }
 
   for(int i = 0; i<numChildren; i++) {
-    bool newPlaAlwaysBest = oppAlwaysBest;
-    bool newOppAlwaysBest = plaAlwaysBest && i == bestChildIdx;
+    //"pla" and "opp" are relative to the player to move at the child. In Influence the same player
+    //often moves again, in which case the roles don't swap.
+    bool sameNextPla = children[i].getIfAllocated() != NULL && children[i].getIfAllocated()->nextPla == pla;
+    bool newPlaAlwaysBest = sameNextPla ? (plaAlwaysBest && i == bestChildIdx) : oppAlwaysBest;
+    bool newOppAlwaysBest = sameNextPla ? oppAlwaysBest : (plaAlwaysBest && i == bestChildIdx);
 
     if(!newPlaAlwaysBest && !newOppAlwaysBest)
       continue;
@@ -858,7 +832,7 @@ static void recordTreePositionsRec(
       Board copy = board;
       BoardHistory histCopy = hist;
       histCopy.makeBoardMoveAssumeLegal(copy, moveLoc, pla);
-      Player nextPla = getOpp(pla);
+      Player nextPla = copy.nextPla;
       recordTreePositionsRec(
         gameData,
         copy,histCopy,nextPla,
@@ -937,6 +911,8 @@ static SearchLimitsThisMove getSearchLimitsThisMove(
   double cheapSearchProb = playSettings.cheapSearchProb;
 
   const BoardHistory& hist = toMoveBot->getRootHist();
+  if(playSettings.reinforceCheapSearchProb >= 0.0 && toMoveBot->getRootBoard().stage == Board::STAGE_REINFORCE)
+    cheapSearchProb = playSettings.reinforceCheapSearchProb;
   if(otherGameProps.hintLoc != Board::NULL_LOC) {
     if(otherGameProps.hintTurn == hist.moveHistory.size() &&
        otherGameProps.hintPosHash == toMoveBot->getRootBoard().pos_hash) {
@@ -1249,12 +1225,6 @@ FinishedGameData* Play::runGame(
 
   // double balanceOpeningProb = playSettings.forSelfPlay ? 0.99 : 1.0;
 
-    if(board.numStonesOnBoard() != 0){
-      // cout << "board not empty when initialize opening" << endl;
-    }else {
-      if(board.numStonesOnBoard() == 0) 
-        RandomOpening::initHub(botB, botW, board, hist, pla, gameRand);
-    }
 
   if(playSettings.initGamesWithPolicy && otherGameProps.allowPolicyInit) {
     double avgPolicyInitMoveNum =
@@ -1380,7 +1350,7 @@ FinishedGameData* Play::runGame(
         if(sidePositionForkLoc != Board::NULL_LOC) {
           SidePosition* sp = new SidePosition(board,hist,pla,(int)gameData->changedNeuralNets.size());
           sp->hist.makeBoardMoveAssumeLegal(sp->board,sidePositionForkLoc,sp->pla);
-          sp->pla = getOpp(sp->pla);
+          sp->pla = sp->board.nextPla;
           if(sp->hist.isGameFinished) delete sp;
           else sidePositionsToSearch.push_back(sp);
         }
@@ -1468,7 +1438,7 @@ FinishedGameData* Play::runGame(
     int nextTurnIdx = (int)hist.moveHistory.size();
     maybeCheckForNewNNEval(nextTurnIdx);
 
-    pla = getOpp(pla);
+    pla = board.nextPla;
   }
 
   gameData->endHist = hist;
@@ -1677,7 +1647,7 @@ FinishedGameData* Play::runGame(
 
         SidePosition* sp2 = new SidePosition(sp->board,sp->hist,sp->pla,(int)gameData->changedNeuralNets.size());
         sp2->hist.makeBoardMoveAssumeLegal(sp2->board,responseLoc,sp2->pla);
-        sp2->pla = getOpp(sp2->pla);
+        sp2->pla = sp2->board.nextPla;
         if(sp2->hist.isGameFinished)
           delete sp2;
         else {
@@ -1692,7 +1662,7 @@ FinishedGameData* Play::runGame(
           Loc forkLoc = chooseRandomForkingMove(nnResultBuf.result.get(), sp2->board, sp2->hist, sp2->pla, gameRand, banMove);
           if(forkLoc != Board::NULL_LOC) {
             sp2->hist.makeBoardMoveAssumeLegal(sp2->board,forkLoc,sp2->pla);
-            sp2->pla = getOpp(sp2->pla);
+            sp2->pla = sp2->board.nextPla;
             if(sp2->hist.isGameFinished) delete sp2;
             else sidePositionsToSearch.push_back(sp2);
           }
@@ -1771,7 +1741,7 @@ static void replayGameUpToMove(const FinishedGameData* finishedGameData, int mov
     }
     assert(finishedGameData->endHist.moveHistory[i].pla == pla);
     hist.makeBoardMoveAssumeLegal(board,loc,pla);
-    pla = getOpp(pla);
+    pla = board.nextPla;
 
     if(hist.isGameFinished)
       return;

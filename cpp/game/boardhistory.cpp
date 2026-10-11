@@ -10,11 +10,11 @@ BoardHistory::BoardHistory()
   :rules(),
    moveHistory(),
    initialBoard(),
-   initialPla(P_BLACK),
+   initialPla(P_WHITE),
    initialTurnNumber(0),
    recentBoards(),
    currentRecentBoardIdx(0),
-   presumedNextMovePla(P_BLACK),
+   presumedNextMovePla(P_WHITE),
    isGameFinished(false),winner(C_EMPTY),
    isNoResult(false),isResignation(false)
 {
@@ -124,12 +124,19 @@ void BoardHistory::clear(const Board& board, Player pla, const Rules& r) {
 
   presumedNextMovePla = pla;
 
-
   isGameFinished = false;
   winner = C_EMPTY;
   isNoResult = false;
   isResignation = false;
 
+  //In Influence the player to move is part of the board state, they must agree.
+  if(pla != board.nextPla)
+    throw StringError("BoardHistory::clear: pla does not match board.nextPla");
+
+  //A starting position where a player owns no cells is already decided
+  Color maybeWinner = GameLogic::checkWinner(board, rules);
+  if(maybeWinner != C_WALL)
+    setWinner(maybeWinner);
 }
 
 BoardHistory BoardHistory::copyToInitial() const {
@@ -224,7 +231,8 @@ void BoardHistory::makeBoardMoveAssumeLegal(Board& board, Loc moveLoc, Player mo
   recentBoards[currentRecentBoardIdx] = board;
 
   moveHistory.push_back(Move(moveLoc,movePla));
-  presumedNextMovePla = getOpp(movePla);
+  //Turns have a variable number of moves, the board knows who moves next
+  presumedNextMovePla = board.nextPla;
 
 
   Color maybeWinner = GameLogic::checkWinnerAfterPlayed(board, *this, movePla, moveLoc);
@@ -251,12 +259,6 @@ Hash128 BoardHistory::getSituationRulesHash(const Board& board, const BoardHisto
 Hash128 BoardHistory::getRulesHash() const
 {
   Hash128 hash=Hash128();
-  hash ^= Rules::ZOBRIST_BASIC_RULE_HASH[rules.basicRule];
-  hash ^= Hash128::mixInt(Rules::ZOBRIST_VCNRULE_HASH_BASE,rules.VCNRule);
   hash ^= Hash128::mixInt(Rules::ZOBRIST_MAXMOVES_HASH_BASE,rules.maxMoves);
-  if(rules.firstPassWin)
-    hash ^= Rules::ZOBRIST_FIRSTPASSWIN_HASH;
   return hash;
 }
-
-

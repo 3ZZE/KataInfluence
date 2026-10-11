@@ -141,7 +141,7 @@ void PlayUtils::initializeGameUsingPolicy(
     //Make the move!
     assert(hist.isLegal(board,loc,pla));
     hist.makeBoardMoveAssumeLegal(board,loc,pla);
-    pla = getOpp(pla);
+    pla = board.nextPla;
 
     //Rarely, playing the random moves out this way will end the game
     if(hist.isGameFinished)
@@ -344,7 +344,7 @@ PlayUtils::BenchmarkResults PlayUtils::benchmarkSearchOnPositionsAndPrint(
         cerr << "SGF Illegal move " << (moveNum+1) << " for " << PlayerIO::colorToChar(moves[moveNum].pla) << ": " << Location::toString(moves[moveNum].loc,board) << endl;
         throw StringError("Illegal move in SGF");
       }
-      nextPla = getOpp(moves[moveNum].pla);
+      nextPla = board.nextPla;
       moveNum += 1;
     }
 
@@ -399,11 +399,8 @@ void PlayUtils::printGenmoveLog(ostream& out, const AsyncBot* bot, const NNEvalu
 }
 
 Rules PlayUtils::genRandomRules(Rand& rand) {
-  vector<int> allowedBasicRules = {Rules::BASICRULE_FREESTYLE, Rules::BASICRULE_STANDARD, Rules::BASICRULE_RENJU};
-
-  Rules rules;
-  rules.basicRule = allowedBasicRules[rand.nextUInt(allowedBasicRules.size())];
-  return rules;
+  (void)rand;
+  return Rules::getDefault();
 }
 
 

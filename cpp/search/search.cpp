@@ -65,7 +65,7 @@ SearchThread::~SearchThread() {
 static const double VALUE_WEIGHT_DEGREES_OF_FREEDOM = 3.0;
 
 Search::Search(SearchParams params, NNEvaluator* nnEval, Logger* lg, const string& rSeed)
-  :rootPla(P_BLACK),
+  :rootPla(P_WHITE),
    rootBoard(),
    rootHistory(),
    rootGraphHash(),
@@ -341,7 +341,8 @@ bool Search::makeMove(Loc moveLoc, Player movePla) {
 
 
   rootHistory.makeBoardMoveAssumeLegal(rootBoard,moveLoc,rootPla);
-  rootPla = getOpp(rootPla);
+  //Influence: turns have a variable number of moves, the board knows who is next
+  rootPla = rootBoard.nextPla;
 
   //Explicitly clear avoid move arrays when we play a move - user needs to respecify them if they want them.
   avoidMoveUntilByLocBlack.clear();
@@ -568,6 +569,9 @@ void Search::beginSearch(bool pondering) {
     patternBonusTable = NULL;
   }
   if(searchParams.avoidRepeatedPatternUtility != 0 || externalPatternBonusTable != nullptr) {
+    //Pattern bonuses are applied using getOpp(node->nextPla) as the player who moved into a node,
+    //which is wrong in Influence where the same player usually moves several times in a row.
+    throw StringError("avoidRepeatedPatternUtility / avoidSgfPatterns are not supported for Influence");
     if(externalPatternBonusTable != nullptr)
       patternBonusTable = new PatternBonusTable(*externalPatternBonusTable);
     else
@@ -770,13 +774,13 @@ SearchNode* Search::allocateOrFindNode(SearchThread& thread, Player nextPla, Loc
         if(thread.history.moveHistory.size() >= 2) {
           Loc prevMoveLoc = thread.history.moveHistory[thread.history.moveHistory.size()-2].loc;
           if(prevMoveLoc != Board::NULL_LOC) {
-            child->subtreeValueBiasTableEntry = subtreeValueBiasTable->get(getOpp(thread.pla), prevMoveLoc, bestChildMoveLoc, thread.history.getRecentBoard(1));
+            child->subtreeValueBiasTableEntry = subtreeValueBiasTable->get(thread.history.moveHistory.back().pla, prevMoveLoc, bestChildMoveLoc, thread.history.getRecentBoard(1));
           }
         }
       }
 
       if(patternBonusTable != NULL)
-        child->patternBonusHash = patternBonusTable->getHash(getOpp(thread.pla), bestChildMoveLoc, thread.history.getRecentBoard(1));
+        child->patternBonusHash = patternBonusTable->getHash(thread.history.moveHistory.back().pla, bestChildMoveLoc, thread.history.getRecentBoard(1));
 
       //Insert into map! Use insertLoc as hint.
       nodeMap.insert(insertLoc, std::make_pair(childHash,child));
@@ -1107,7 +1111,7 @@ bool Search::playoutDescend(
 
       //Make the move! We need to make the move before we create the node so we can see the new state and get the right graphHash.
       thread.history.makeBoardMoveAssumeLegal(thread.board,bestChildMoveLoc,thread.pla);
-      thread.pla = getOpp(thread.pla);
+      thread.pla = thread.board.nextPla;
       if(searchParams.useGraphSearch)
         thread.graphHash = GraphHash::getGraphHash(
            thread.history, thread.pla
@@ -1164,7 +1168,7 @@ bool Search::playoutDescend(
 
       //Make the move!
       thread.history.makeBoardMoveAssumeLegal(thread.board,bestChildMoveLoc,thread.pla);
-      thread.pla = getOpp(thread.pla);
+      thread.pla = thread.board.nextPla;
       if(searchParams.useGraphSearch)
         thread.graphHash = GraphHash::getGraphHash(thread.history, thread.pla
         );

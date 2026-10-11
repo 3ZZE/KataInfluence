@@ -267,7 +267,8 @@ double Search::getPatternBonus(Hash128 patternBonusHash, Player prevMovePla) con
 }
 
 double Search::interpolateEarly(double halflife, double earlyValue, double value) const {
-  double rawHalflives = (rootHistory.initialTurnNumber + rootHistory.moveHistory.size()) / halflife;
+  //Influence: count full player turns, not micro-moves (one turn can have dozens of moves)
+  double rawHalflives = rootBoard.turnNumber / halflife;
   double halflives = rawHalflives * 19.0 / sqrt(rootBoard.x_size*rootBoard.y_size);
   return value + (earlyValue - value) * pow(0.5, halflives);
 }

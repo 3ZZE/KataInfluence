@@ -159,7 +159,7 @@ int MainCmds::evalsgf(const vector<string>& args) {
         throw StringError("Illegal extra move");
       }
       hist.makeBoardMoveAssumeLegal(board,loc,nextPla);
-      nextPla = getOpp(nextPla);
+      nextPla = board.nextPla;
     }
   };
 
@@ -283,7 +283,7 @@ int MainCmds::evalsgf(const vector<string>& args) {
         return 1;
       }
       copyHist.makeBoardMoveAssumeLegal(copy,loc,pla);
-      pla = getOpp(pla);
+      pla = copy.nextPla;
     }
     Board::printBoard(sout, copy, Board::NULL_LOC, &(copyHist.moveHistory));
   }

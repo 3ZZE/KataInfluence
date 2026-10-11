@@ -16,9 +16,8 @@ chmod +x "$RUN_DIR/engine/katago"
 mkdir -p "$RUN_DIR/train"
 cp ../python/*.py ../python/*.sh "$RUN_DIR/train/"
 
-cp ./run_dots.sh   "$RUN_DIR/run_dots.sh"
+cp ./run_influence.sh   "$RUN_DIR/run_influence.sh"
 cp ./selfplay.cfg  "$RUN_DIR/selfplay.cfg"
-cp -r ./opening_sgf "$RUN_DIR/opening_sgf"
-chmod +x "$RUN_DIR/run_dots.sh"
+chmod +x "$RUN_DIR/run_influence.sh"
 
-echo "Created $RUN_DIR. Run: cd $RUN_DIR && bash run_dots.sh"
+echo "Created $RUN_DIR. Run: cd $RUN_DIR && bash run_influence.sh"

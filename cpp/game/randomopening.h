@@ -1,25 +1,20 @@
 #pragma once
-#include "../search/asyncbot.h"
-#include "boardhistory.h"
-
-class Search;
+#include "../core/rand.h"
+#include "board.h"
 
 namespace RandomOpening {
 
-  struct Opening {
-    Board board;
-    BoardHistory hist;
-    Player nextPlayer;
-    Opening(int x_size, int y_size);
-  };
-  std::vector<Opening> getOpenings(Search* botB, Search* botW, Rand& gameRand, int cnt, int x, int y);
-
-  void initRandomOpening(Board& board, BoardHistory& hist, Player& nextPlayer, Rand& gameRand);
-
-  void initializeCross(Board& board, BoardHistory& hist, Player& nextPlayer, Rand& gameRand);
-
-  void initBalanced(Search* botB, Search* botW, Board& board, BoardHistory& hist, Player& nextPlayer, Rand& gameRand);
-  void initHub(Search* botB, Search* botW, Board& board, BoardHistory& hist, Player& nextPlayer, Rand& gameRand);
-
+  //Create a starting position for selfplay on an xSize*ySize box. White moves first.
+  //- With probability randomWallsProb, cells become walls independently with a random density in [0, maxWallDensity].
+  //- With probability randomStartProb, the two starting cells and their strengths are random,
+  //  otherwise the default setup of RULES.md 3 is used.
+  //All cells are small for now.
+  Board initStartPosition(
+    int xSize,
+    int ySize,
+    Rand& rand,
+    double randomStartProb,
+    double randomWallsProb,
+    double maxWallDensity);
 
 }  // namespace RandomOpening

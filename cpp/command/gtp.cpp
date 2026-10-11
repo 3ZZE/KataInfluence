@@ -32,7 +32,8 @@ static const vector<string> knownCommands = {
   "rectangular_boardsize",
 
   "clear_board",
-  "set_position",
+  //Influence: set the whole position, rows separated by '/', see Board::parseBoard
+  "set_board",
   "komi",
   "play",
   "undo",
@@ -49,6 +50,8 @@ static const vector<string> knownCommands = {
   "kgs-rules",
 
   "genmove",
+  //Influence: generate and play moves until the player's turn is over, returns the space-separated sequence
+  "genturn",
   "genmove_debug", //Prints additional info to stderr
   "search_debug", //Prints additional info to stderr, doesn't actually make the move
 
@@ -56,9 +59,6 @@ static const vector<string> knownCommands = {
   "clear_cache",
 
   "showboard",
-  "fixed_handicap",
-  "place_free_handicap",
-  "set_free_handicap",
 
   "time_settings",
   "kgs-time_settings",
@@ -343,8 +343,8 @@ struct GTPEngine {
     bot = new AsyncBot(params, nnEval, &logger, searchRandSeed);
     bot->setCopyOfExternalPatternBonusTable(patternBonusTable);
 
-    Board board(boardXSize,boardYSize);
-    Player pla = P_BLACK;
+    Board board = Board::getDefaultStart(boardXSize,boardYSize);
+    Player pla = board.nextPla;
     BoardHistory hist(board,pla,currentRules);
     vector<Move> newMoveHistory;
     setPositionAndRules(pla,board,hist,board,pla,newMoveHistory);
@@ -366,41 +366,23 @@ struct GTPEngine {
     assert(bot->getRootHist().rules == currentRules);
     int newXSize = bot->getRootBoard().x_size;
     int newYSize = bot->getRootBoard().y_size;
-    Board board(newXSize,newYSize);
-    Player pla = P_BLACK;
+    Board board = Board::getDefaultStart(newXSize,newYSize);
+    Player pla = board.nextPla;
     BoardHistory hist(board,pla,currentRules);
     vector<Move> newMoveHistory;
     setPositionAndRules(pla,board,hist,board,pla,newMoveHistory);
     clearStatsForNewGame();
   }
 
-  bool setPosition(const vector<Move>& initialStones) {
+  //Influence: set an arbitrary position (walls, cells, turn state). Board size must match the current size.
+  void setBoard(const Board& board) {
     assert(bot->getRootHist().rules == currentRules);
-    int newXSize = bot->getRootBoard().x_size;
-    int newYSize = bot->getRootBoard().y_size;
-    Board board(newXSize,newYSize);
-    //bool suc = board.setStones(initialStones);
-    for(int i = 0; i < initialStones.size(); i++) {
-      auto mv = initialStones[i];
-      if(!board.isLegal(mv.loc, mv.pla))
-        return false;
-      board.playMoveAssumeLegal(mv.loc, mv.pla);
-    }
-
-    //Sanity check
-    for(int i = 0; i<initialStones.size(); i++) {
-      if(board.colors[initialStones[i].loc] != initialStones[i].pla) {
-        assert(false);
-        return false;
-      }
-    }
-    Player pla = initialStones.size() == 0 ? C_BLACK : getOpp(initialStones[initialStones.size() - 1].pla);
+    Player pla = board.nextPla;
     BoardHistory hist(board,pla,currentRules);
-    hist.setInitialTurnNumber(board.numStonesOnBoard()); //Heuristic to guess at what turn this is
+    hist.setInitialTurnNumber(board.turnNumber);
     vector<Move> newMoveHistory;
     setPositionAndRules(pla,board,hist,board,pla,newMoveHistory);
     clearStatsForNewGame();
-    return true;
   }
 
 
@@ -862,7 +844,7 @@ struct GTPEngine {
       bool suc = hist.makeBoardMoveTolerant(board, loc, pla);
       if(!suc)
         return "illegal move sequence";
-      pla = getOpp(pla);
+      pla = board.nextPla;
     }
 
     string policyStr = "Policy: ";
@@ -1918,42 +1900,42 @@ int MainCmds::gtp(const vector<string>& args) {
       }
     }
 
-    else if(command == "set_position") {
-      if(pieces.size() % 2 != 0) {
+    else if(command == "set_board") {
+      //Rows separated by '/', cells separated by spaces, optional final "state <pla> <stage> <src> <points> <turn>" row
+      string boardStr = Global::concat(pieces," ");
+      vector<string> rows;
+      for(const string& row: Global::split(boardStr,'/')) {
+        string r = Global::trim(row);
+        if(r.length() > 0 && !Global::isPrefix(r,"state"))
+          rows.push_back(r);
+      }
+      int newXSize = 0;
+      if(rows.size() > 0) {
+        for(const string& t: Global::split(rows[0],' '))
+          if(Global::trim(t).length() > 0)
+            newXSize++;
+      }
+      int newYSize = (int)rows.size();
+      if(newXSize < 2 || newYSize < 2 || newXSize > Board::MAX_LEN || newYSize > Board::MAX_LEN) {
         responseIsError = true;
-        response = "Expected a space-separated sequence of <COLOR> <VERTEX> pairs but got '" + Global::concat(pieces," ") + "'";
+        response = "Could not parse board or unacceptable size";
       }
       else {
-        vector<Move> initialStones;
-        for(int i = 0; i<pieces.size(); i += 2) {
-          Player pla;
-          Loc loc;
-          if(!PlayerIO::tryParsePlayer(pieces[i],pla)) {
-            responseIsError = true;
-            response = "Expected a space-separated sequence of <COLOR> <VERTEX> pairs but got '" + Global::concat(pieces," ") + "': ";
-            response += "could not parse color: '" + pieces[0] + "'";
-            break;
-          }
-          else if(!tryParseLoc(pieces[i+1],engine->bot->getRootBoard(),loc)) {
-            responseIsError = true;
-            response = "Expected a space-separated sequence of <COLOR> <VERTEX> pairs but got '" + Global::concat(pieces," ") + "': ";
-            response += "Could not parse vertex: '" + pieces[1] + "'";
-            break;
-          }
-          else if(loc == Board::PASS_LOC) {
-            responseIsError = true;
-            response = "Expected a space-separated sequence of <COLOR> <VERTEX> pairs but got '" + Global::concat(pieces," ") + "': ";
-            response += "Could not parse vertex: '" + pieces[1] + "'";
-            break;
-          }
-          initialStones.push_back(Move(loc,pla));
+        Board board;
+        bool parsed = false;
+        try {
+          board = Board::parseBoard(newXSize,newYSize,boardStr,'/');
+          parsed = true;
         }
-        if(!responseIsError) {
-          bool suc = engine->setPosition(initialStones);
-          if(!suc) {
-            responseIsError = true;
-            response = "Illegal stone placements - overlapping stones or stones with no liberties?";
-          }
+        catch(const StringError& e) {
+          responseIsError = true;
+          response = string("Could not parse board: ") + e.what();
+        }
+        if(parsed) {
+          const Board& cur = engine->bot->getRootBoard();
+          if(cur.x_size != newXSize || cur.y_size != newYSize)
+            engine->setOrResetBoardSize(cfg,logger,seedRand,newXSize,newYSize,logger.isLoggingToStderr());
+          engine->setBoard(board);
           maybeStartPondering = false;
         }
       }
@@ -1977,6 +1959,10 @@ int MainCmds::gtp(const vector<string>& args) {
         responseIsError = true;
         response = "Could not parse color: '" + pieces[0] + "'";
       }
+      else if(pla != engine->bot->getRootBoard().nextPla && !engine->bot->getRootHist().isGameFinished) {
+        responseIsError = true;
+        response = "It is " + PlayerIO::playerToString(engine->bot->getRootBoard().nextPla) + "'s move";
+      }
       else {
         bool debug = command == "genmove_debug" || command == "search_debug";
         bool playChosenMove = command != "search_debug";
@@ -1990,6 +1976,47 @@ int MainCmds::gtp(const vector<string>& args) {
           response,responseIsError,maybeStartPondering,
           GTPEngine::AnalyzeArgs()
         );
+      }
+    }
+
+    else if(command == "genturn") {
+      Player pla;
+      if(pieces.size() != 1) {
+        responseIsError = true;
+        response = "Expected one argument for genturn but got '" + Global::concat(pieces," ") + "'";
+      }
+      else if(!PlayerIO::tryParsePlayer(pieces[0],pla)) {
+        responseIsError = true;
+        response = "Could not parse color: '" + pieces[0] + "'";
+      }
+      else if(pla != engine->bot->getRootBoard().nextPla) {
+        responseIsError = true;
+        response = "It is " + PlayerIO::playerToString(engine->bot->getRootBoard().nextPla) + "'s move";
+      }
+      else {
+        //Each micro-move gets its own search, the turn ends when the other player is to move or the game ends
+        string allMoves;
+        while(!responseIsError && !engine->bot->getRootHist().isGameFinished && engine->bot->getRootBoard().nextPla == pla) {
+          string moveResponse;
+          engine->genMove(
+            pla,
+            logger,searchFactorWhenWinningThreshold,searchFactorWhenWinning,
+            ogsChatToStderr,
+            false,resignThreshold,resignConsecTurns,
+            logSearchInfo,false,true,
+            moveResponse,responseIsError,maybeStartPondering,
+            GTPEngine::AnalyzeArgs()
+          );
+          if(responseIsError) {
+            response = moveResponse;
+            break;
+          }
+          if(allMoves.length() > 0)
+            allMoves += " ";
+          allMoves += moveResponse;
+        }
+        if(!responseIsError)
+          response = allMoves;
       }
     }
 
@@ -2260,7 +2287,7 @@ int MainCmds::gtp(const vector<string>& args) {
             allLegal = false;
             break;
           }
-          pla = getOpp(pla);
+          pla = board.nextPla;
         }
         if(allLegal) {
           Board::printBoard(sout, board, Board::NULL_LOC, &hist.moveHistory);
@@ -2392,101 +2419,6 @@ int MainCmds::gtp(const vector<string>& args) {
         }
       }
     } 
-    else if(command == "firstpasswin" || command == "fpw")  // Maxmoves settings
-    {
-      int tmp;
-      if(
-        pieces.size() != 1 || (pieces[0] != "on" && pieces[0] != "off" && pieces[0] != "true" && pieces[0] != "false" &&
-                               pieces[0] != "open" && pieces[0] != "close")) {
-        responseIsError = true;
-        response = "Expected one arguments for firstpasswin but got '" + Global::concat(pieces, " ") + "'";
-      } else {
-        Rules currentRules = engine->getCurrentRules();
-        Rules newRules;
-
-        string fpw = "false";
-        if(pieces[0] == "on" || pieces[0] == "open" || pieces[0] == "true")
-          fpw = "true";
-
-        bool parseSuccess = false;
-        try {
-          newRules = Rules::updateRules("firstpasswin", fpw, currentRules);
-          parseSuccess = true;
-        } catch(const StringError& err) {
-          responseIsError = true;
-          response = err.what();
-        }
-        if(parseSuccess) {
-          string error;
-          bool suc = engine->setRules(newRules, error);
-          if(!suc) {
-            responseIsError = true;
-            response = error;
-          }
-          logger.write("Changed rules to " + newRules.toString());
-          if(!logger.isLoggingToStderr())
-            cerr << "Changed rules to " + newRules.toString() << endl;
-        }
-      }
-    } 
-    else if(Rules::basicRuleStrings().count(Global::toUpper(command)))  // Is Command a basic rule?
-    {
-      if(pieces.size() != 0) {
-        responseIsError = true;
-        response = "Expected zero arguments for BasicRule but got '" + Global::concat(pieces, " ") + "'";
-      } else {
-        Rules currentRules = engine->getCurrentRules();
-        Rules newRules;
-        bool parseSuccess = false;
-        try {
-          newRules = Rules::updateRules("basicrule", command, currentRules);
-          parseSuccess = true;
-        } catch(const StringError& err) {
-          responseIsError = true;
-          response = err.what();
-        }
-        if(parseSuccess) {
-          string error;
-          bool suc = engine->setRules(newRules, error);
-          if(!suc) {
-            responseIsError = true;
-            response = error;
-          }
-          logger.write("Changed rules to " + newRules.toString());
-          if(!logger.isLoggingToStderr())
-            cerr << "Changed rules to " + newRules.toString() << endl;
-        }
-      }
-    } 
-    else if(Rules::VCNRuleStrings().count(Global::toUpper(command)))  // Is Command a VCN rule?
-    {
-      if(pieces.size() != 0) {
-        responseIsError = true;
-        response = "Expected zero arguments for VCNrule but got '" + Global::concat(pieces, " ") + "'";
-      } else {
-        Rules currentRules = engine->getCurrentRules();
-        Rules newRules;
-        bool parseSuccess = false;
-        try {
-          newRules = Rules::updateRules("vcnrule", command, currentRules);
-          parseSuccess = true;
-        } catch(const StringError& err) {
-          responseIsError = true;
-          response = err.what();
-        }
-        if(parseSuccess) {
-          string error;
-          bool suc = engine->setRules(newRules, error);
-          if(!suc) {
-            responseIsError = true;
-            response = error;
-          }
-          logger.write("Changed rules to " + newRules.toString());
-          if(!logger.isLoggingToStderr())
-            cerr << "Changed rules to " + newRules.toString() << endl;
-        }
-      }
-    }
     else {
       responseIsError = true;
       response = "unknown command";

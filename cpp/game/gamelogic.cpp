@@ -1,5 +1,4 @@
 #include "../game/gamelogic.h"
-#include "board.h"
 
 /*
  * gamelogic.cpp
@@ -7,39 +6,22 @@
  * Some other game logics are in board.h/cpp
  */
 
-#include <algorithm>
-#include <cassert>
-#include <cstring>
-#include <iostream>
-#include <vector>
-
 using namespace std;
 
-void DfsHelper2(const Board& board, int x, int y, Color color) {
-  const int loc = Location::getLoc(x, y, board.x_size);
-  if(board.dfs_buf[loc] & 2) {
-    return;
-  }
-  const int board_clr = board.colors[loc];
-  const int color_op = getOpp(color);
-  if (!(board_clr == color || board_clr == color_op + 3 || (board_clr == C_EMPTY && ((board.dfs_buf[loc] & 1) == 1)))) {
-    return;
-  }
-  board.dfs_buf[loc] |= 2;
-
-  if(x > 0) {
-    DfsHelper2(board, x - 1, y, color);
-  }
-  if(x + 1 < board.x_size) {
-    DfsHelper2(board,x + 1, y, color);
-  }
-  if(y > 0) {
-    DfsHelper2(board, x, y - 1, color);
-  }
-  if(y + 1 < board.y_size) {
-    DfsHelper2(board,x, y + 1, color);
-  }
-  return;
+Color GameLogic::checkWinner(const Board& board, const Rules& rules) {
+  //RULES.md 5: a player who owns no cells has lost
+  int whiteArea = board.getArea(C_WHITE);
+  int blackArea = board.getArea(C_BLACK);
+  if(whiteArea == 0 && blackArea == 0)
+    return C_EMPTY;
+  if(whiteArea == 0)
+    return C_BLACK;
+  if(blackArea == 0)
+    return C_WHITE;
+  //Technical move limit, counted in full player turns
+  if(rules.maxMoves > 0 && board.turnNumber >= rules.maxMoves)
+    return C_EMPTY;
+  return C_WALL;
 }
 
 Color GameLogic::checkWinnerAfterPlayed(
@@ -47,153 +29,7 @@ Color GameLogic::checkWinnerAfterPlayed(
   const BoardHistory& hist,
   Player pla,
   Loc loc) {
-    const Color color = pla;
-    const Color opp_clr = getOpp(pla);
-
-
-    int empty_cnt = 0;
-    for(int i = 0; i < board.MAX_ARR_SIZE; i++) {
-        if (board.colors[i] == C_EMPTY) {
-            empty_cnt++;
-        }
-    }
-    if (board.x_size * board.y_size < 2 + empty_cnt) {
-        if (loc == 1) {
-            return opp_clr;
-        }
-        return C_WALL;
-    }
-
-    
-  for(int i = 0; i < board.MAX_ARR_SIZE; i++) {
-    board.dfs_buf[i] = 0;
-  }
-  for(int y = 0; y < board.y_size; y++) {
-    for(int x = 0; x < board.x_size; x++) {
-      const Loc lc = Location::getLoc(x, y, board.x_size);
-      if(board.colors[lc] == C_BLACK_CAPTURED) {
-        board.bufDfs(x, y, C_WHITE);
-      }
-    }
-  }
-
-  for(int i = 0; i < board.x_size; i++) {
-    DfsHelper2(board, i, 0, C_WHITE);
-    DfsHelper2(board, i, board.y_size - 1, C_WHITE);
-  }
-  for(int i = 0; i < board.y_size; i++) {
-    DfsHelper2(board, 0, i, C_WHITE);
-    DfsHelper2(board, board.x_size - 1, i, C_WHITE);
-  }
-  int notsafe_white = 0;
-  for(int i = 0; i < board.MAX_ARR_SIZE; i++) {
-        if (board.colors[i] == C_WHITE && ((board.dfs_buf[i] & 2) == 0) ) {
-            notsafe_white++;
-        }
-    }
-
-  int captured_black = 0;
-  int maybe_captured_black = 0;
-  for(int i = 0; i < board.MAX_ARR_SIZE; i++) {
-        if (board.colors[i] == C_BLACK_CAPTURED  ) {
-            if ((board.dfs_buf[i] & 2) == 2) {
-                captured_black++;
-            } else {
-                maybe_captured_black++;
-            }
-        }
-    }
-
-
-
-
-  for(int i = 0; i < board.MAX_ARR_SIZE; i++) {
-    board.dfs_buf[i] = 0;
-  }
-  for(int y = 0; y < board.y_size; y++) {
-    for(int x = 0; x < board.x_size; x++) {
-      const Loc lc = Location::getLoc(x, y, board.x_size);
-      if(board.colors[lc] == C_WHITE_CAPTURED) {
-        board.bufDfs(x, y, C_BLACK);
-      }
-    }
-  }
-
-
-  for(int i = 0; i < board.x_size; i++) {
-    DfsHelper2(board, i, 0, C_BLACK);
-    DfsHelper2(board, i, board.y_size - 1, C_BLACK);
-  }
-  for(int i = 0; i < board.y_size; i++) {
-    DfsHelper2(board, 0, i, C_BLACK);
-    DfsHelper2(board, board.x_size - 1, i, C_BLACK);
-  }
-  int notsafe_black = 0;
-  for(int i = 0; i < board.MAX_ARR_SIZE; i++) {
-        if (board.colors[i] == C_BLACK && ((board.dfs_buf[i] & 2) == 0) ) {
-            notsafe_black++;
-        }
-    }
-
-  int captured_white = 0;
-  int maybe_captured_white = 0;
-
-  for(int i = 0; i < board.MAX_ARR_SIZE; i++) {
-        if (board.colors[i] == C_WHITE_CAPTURED) {
-            if ((board.dfs_buf[i] & 2) == 2) {
-                captured_white++;
-            } else {
-                maybe_captured_white++;
-            }
-        }
-    }
-
-    if (loc == 1)  { // PASS
-        if (pla == P_WHITE) {
-            int total_white = captured_white + maybe_captured_white + notsafe_white;
-            if (captured_black > total_white) {
-                return C_WHITE;
-            } else if ( captured_black == total_white) {
-                return C_EMPTY;
-            } else {
-                return C_BLACK;
-            }
-        } else if (pla == P_BLACK) {
-            int total_black = captured_black + maybe_captured_black + notsafe_black;
-            if (captured_white > total_black) {
-                return C_BLACK;
-            } else if ( captured_white == total_black) {
-                return C_EMPTY;
-            } else{ 
-                return C_WHITE; 
-            }
-        } else {
-        ASSERT_UNREACHABLE;
-        }
-    }
-
-  if (captured_white > captured_black + maybe_captured_black + notsafe_black) {
-        return C_BLACK;
-    }
-
-  if (captured_black > captured_white + maybe_captured_white + notsafe_white) {
-        return C_WHITE;
-    }
-    if (notsafe_white == 0 && notsafe_black == 0) {
-        assert(maybe_captured_black == 0);
-        assert(maybe_captured_white == 0);
-        return C_EMPTY;
-    }
-    if (empty_cnt == 0) {
-            int total_black = captured_black + maybe_captured_black + notsafe_black;
-            int total_white = captured_white + maybe_captured_white + notsafe_white;
-        if (total_black > total_white) {
-            return C_WHITE;
-        } else if (total_white >  total_black) {
-            return C_BLACK;
-        } else {
-            return C_EMPTY;
-        }
-    }
-    return C_WALL;
+  (void)pla;
+  (void)loc;
+  return checkWinner(board, hist.rules);
 }
