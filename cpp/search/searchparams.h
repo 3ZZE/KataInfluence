@@ -11,6 +11,17 @@ struct SearchParams {
   
   double noResultUtilityReduce;  // Decrease draw utility for both side (if positive)
 
+  //Moves-left utility (as in lc0): once the root is clearly decided, prefer lines that end the game sooner when winning
+  //and later when losing. Bonus = -sign(rootWL) * shape(|rootWL|) * clamp(slope * (M - rootM), +-maxEffect), where M is the
+  //predicted number of player turns left (0 at terminal nodes) and shape(q) = constant + scaled*q' + quadratic*q'^2 with
+  //q' = (|q| - threshold) / (1 - threshold). No bonus while |rootWL| <= threshold. Off when movesLeftSlope is 0.
+  double movesLeftSlope;
+  double movesLeftMaxEffect;
+  double movesLeftThreshold;
+  double movesLeftConstantFactor;
+  double movesLeftScaledFactor;
+  double movesLeftQuadraticFactor;
+
   //Search tree exploration parameters
   double cpuctExploration;  //Constant factor on exploration, should also scale up linearly with magnitude of utility
   double cpuctExplorationLog; //Constant factor on log-scaling exploration, should also scale up linearly with magnitude of utility

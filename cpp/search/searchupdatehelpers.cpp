@@ -13,12 +13,13 @@ void Search::addLeafValue(
   SearchNode& node,
   double winLossValue,
   double noResultValue,
+  double movesLeft,
   double weight,
   bool isTerminal,
   bool assumeNoExistingWeight
 ) {
   double utility =
-    getResultUtility(winLossValue, noResultValue);
+    getResultUtility(winLossValue, noResultValue) + getMovesLeftUtility(movesLeft);
 
   if(searchParams.subtreeValueBiasFactor != 0 && !isTerminal && node.subtreeValueBiasTableEntry != nullptr) {
     SubtreeValueBiasEntry& entry = *(node.subtreeValueBiasTableEntry);
@@ -79,7 +80,7 @@ void Search::addCurrentNNOutputAsLeafValue(SearchNode& node, bool assumeNoExisti
   double lossProb = (double)nnOutput->whiteLossProb;
   double noResultProb = (double)nnOutput->whiteNoResultProb;
   double weight = computeWeightFromNNOutput(nnOutput);
-  addLeafValue(node,winProb-lossProb,noResultProb,weight,false,assumeNoExistingWeight);
+  addLeafValue(node,winProb-lossProb,noResultProb,nnOutput->movesLeft,weight,false,assumeNoExistingWeight);
 }
 
 double Search::computeWeightFromNNOutput(const NNOutput* nnOutput) const {
@@ -224,7 +225,7 @@ void Search::recomputeNodeStats(SearchNode& node, SearchThread& thread, int numV
     double lossProb = (double)nnOutput->whiteLossProb;
     double noResultProb = (double)nnOutput->whiteNoResultProb;
     double utility =
-      getResultUtility(winProb-lossProb, noResultProb);
+      getResultUtility(winProb-lossProb, noResultProb) + getMovesLeftUtility(nnOutput->movesLeft);
 
     if(searchParams.subtreeValueBiasFactor != 0 && node.subtreeValueBiasTableEntry != nullptr) {
       SubtreeValueBiasEntry& entry = *(node.subtreeValueBiasTableEntry);

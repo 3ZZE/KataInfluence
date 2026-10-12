@@ -77,6 +77,8 @@ Search::Search(SearchParams params, NNEvaluator* nnEval, Logger* lg, const strin
    plaThatSearchIsFor(C_EMPTY),plaThatSearchIsForLastSearch(C_EMPTY),
    lastSearchNumPlayouts(0),
    effectiveSearchTimeCarriedOver(0.0),
+   movesLeftRootM(0.0),
+   movesLeftRootFactor(0.0),
    randSeed(rSeed),
    valueWeightDistribution(NULL),
    patternBonusTable(NULL),
@@ -718,12 +720,51 @@ void Search::beginSearch(bool pondering) {
     }
   }
 
+  //Fix the moves-left center and sign for this search. Utilities in a reused tree were computed with the previous
+  //search's values, so recompute them (like upstream KataGo does for its dynamic score center).
+  double oldMovesLeftRootFactor = movesLeftRootFactor;
+  double oldMovesLeftRootM = movesLeftRootM;
+  computeRootValues();
+  if(
+    rootNode != NULL && patternBonusTable == NULL &&
+    (movesLeftRootFactor != oldMovesLeftRootFactor || (movesLeftRootFactor != 0.0 && movesLeftRootM != oldMovesLeftRootM))
+  ) {
+    recursivelyRecomputeStats(*rootNode);
+  }
+
   //Clear unused stuff in value bias table since we may have pruned rootNode stuff
   if(searchParams.subtreeValueBiasFactor != 0 && subtreeValueBiasTable != NULL)
     subtreeValueBiasTable->clearUnusedSynchronous();
 
   //Mark all nodes old for the purposes of updating old nnoutputs
   searchNodeAge++;
+}
+
+void Search::computeRootValues() {
+  movesLeftRootM = 0.0;
+  movesLeftRootFactor = 0.0;
+  if(searchParams.movesLeftSlope <= 0.0)
+    return;
+
+  //Root eval for the center. Not skipping the cache, so the search's own root eval usually reuses it.
+  NNResultBuf nnResultBuf;
+  computeRootNNEvaluation(nnResultBuf);
+  const NNOutput& nnOutput = *(nnResultBuf.result);
+  movesLeftRootM = nnOutput.movesLeft;
+
+  //Whether the root is decided: prefer the reused tree's search value over the raw net
+  double rootWL = (double)nnOutput.whiteWinProb - (double)nnOutput.whiteLossProb;
+  if(rootNode != NULL && rootNode->stats.visits.load(std::memory_order_acquire) > 0)
+    rootWL = rootNode->stats.winLossValueAvg.load(std::memory_order_acquire);
+
+  double threshold = searchParams.movesLeftThreshold;
+  double absWL = std::fabs(rootWL);
+  if(absWL <= threshold)
+    return;
+  double q = (absWL - threshold) / (1.0 - threshold);
+  double shape = searchParams.movesLeftConstantFactor + searchParams.movesLeftScaledFactor * q + searchParams.movesLeftQuadraticFactor * q * q;
+  //Winning side (white if rootWL > 0) gains utility when fewer turns are left
+  movesLeftRootFactor = (rootWL > 0 ? -1.0 : 1.0) * shape;
 }
 
 uint32_t Search::createMutexIdxForNode(SearchThread& thread) const {
@@ -923,7 +964,10 @@ void Search::recursivelyRecomputeStats(SearchNode& n) {
         assert(isRoot);
       }
       else {
-        double resultUtility = getResultUtility(winLossValueAvg, noResultValueAvg);
+        //Childless nodes are either NN leaves or terminal (no turns left)
+        const NNOutput* nnOutput = node->getNNOutput();
+        double movesLeft = nnOutput != NULL ? nnOutput->movesLeft : 0.0;
+        double resultUtility = getResultUtility(winLossValueAvg, noResultValueAvg) + getMovesLeftUtility(movesLeft);
         double newUtilityAvg = resultUtility;
         newUtilityAvg += getPatternBonus(node->patternBonusHash,getOpp(node->nextPla));
         double newUtilitySqAvg = newUtilityAvg * newUtilityAvg;
@@ -991,7 +1035,9 @@ bool Search::playoutDescend(
       double winLossValue = thread.history.winner == C_WHITE ? 1.0 : thread.history.winner == C_BLACK ? -1.0 : 0.0;
       double noResultValue = thread.history.winner == C_EMPTY ? 1.0 : 0.0;
       double weight = (searchParams.useUncertainty && nnEvaluator->supportsShorttermError()) ? searchParams.uncertaintyMaxWeight : 1.0;
-      addLeafValue(node, winLossValue, noResultValue, weight, true, false);
+      //The game is over, so no turns are left
+      double movesLeft = 0.0;
+      addLeafValue(node, winLossValue, noResultValue, movesLeft, weight, true, false);
       return true;
     
   }

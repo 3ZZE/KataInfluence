@@ -153,6 +153,9 @@ struct NNOutput {
   float whiteLossProb;
   float whiteNoResultProb;
 
+  //Predicted number of player turns until the game ends (the scoremean head, trained on the moves-left target).
+  //Not player-relative. Raw head output before postprocessing in nneval.
+  float movesLeft;
   //Expected arrival time of remaining game variance, in turns, weighted by variance, only when modelVersion >= 9
   float varTimeLeft;
   //A metric indicating the "typical" error in the winloss value or the score that the net expects, relative to the

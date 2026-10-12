@@ -240,7 +240,16 @@ double Search::getResultUtilityFromNN(const NNOutput& nnOutput) const {
 
 double Search::getUtilityFromNN(const NNOutput& nnOutput) const {
   double resultUtility = getResultUtilityFromNN(nnOutput);
-  return resultUtility;
+  return resultUtility + getMovesLeftUtility(nnOutput.movesLeft);
+}
+
+//White-perspective bonus for a position predicted to end the game in movesLeft turns, relative to the root
+double Search::getMovesLeftUtility(double movesLeft) const {
+  if(movesLeftRootFactor == 0.0)
+    return 0.0;
+  double cap = searchParams.movesLeftMaxEffect;
+  double m = std::min(cap, std::max(-cap, searchParams.movesLeftSlope * (movesLeft - movesLeftRootM)));
+  return movesLeftRootFactor * m;
 }
 
 

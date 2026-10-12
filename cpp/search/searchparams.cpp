@@ -9,6 +9,12 @@ SearchParams::SearchParams()
   :winLossUtilityFactor(1.0),
    noResultUtilityForWhite(0.0),
    noResultUtilityReduce(0.0),
+   movesLeftSlope(0.0),
+   movesLeftMaxEffect(0.0345),
+   movesLeftThreshold(0.8),
+   movesLeftConstantFactor(0.0),
+   movesLeftScaledFactor(1.6521),
+   movesLeftQuadraticFactor(0.0),
    cpuctExploration(1.0),
    cpuctExplorationLog(0.0),
    cpuctExplorationBase(500),
@@ -145,6 +151,12 @@ void SearchParams::printParams(std::ostream& out) {
 
   PRINTPARAM(winLossUtilityFactor);
   PRINTPARAM(noResultUtilityForWhite);
+  PRINTPARAM(movesLeftSlope);
+  PRINTPARAM(movesLeftMaxEffect);
+  PRINTPARAM(movesLeftThreshold);
+  PRINTPARAM(movesLeftConstantFactor);
+  PRINTPARAM(movesLeftScaledFactor);
+  PRINTPARAM(movesLeftQuadraticFactor);
 
   PRINTPARAM(cpuctExploration);
   PRINTPARAM(cpuctExplorationLog);

@@ -132,6 +132,8 @@ struct TrainingWriteBuffers {
 
   //Value targets and other metadata, from the perspective of the player to move
   //C0-3: Categorial game result, win,loss,noresult, and also score. Draw is encoded as some blend of win and loss based on drawEquivalentWinsForWhite.
+  //Influence: every "score" slot (C3, C7, C11, C15, C19 and scoreDistrN) holds the moves-left target instead, the number
+  //of player turns from this position until the game ended (the actual value, not a TD blend), zero if C27 is zero.
   //C4-7: MCTS win-loss-noresult estimate td-like target, lambda = 1 - 1/(1 + boardArea * 0.176)
   //C8-11: MCTS win-loss-noresult estimate td-like target, lambda = 1 - 1/(1 + boardArea * 0.056)
   //C12-15: MCTS win-loss-noresult estimate td-like target, lambda = 1 - 1/(1 + boardArea * 0.016)
@@ -197,6 +199,7 @@ struct TrainingWriteBuffers {
   //Indices correspond to scores, from (-dataXLen*dataYLen-EXTRA_SCORE_DISTR_RADIUS)-0.5 to (dataXLen*dataYLen+EXTRA_SCORE_DISTR_RADIUS)+0.5,
   //making 2*dataXLen*dataYLen+2*EXTRA_SCORE_DISTR_RADIUS indices in total.
   //Index of the actual score is labeled with 100, the rest labeled with 0, from the perspective of the player to move.
+  //Influence: moves left M (an integer) is split 50/50 over the two bins around it, mid+M-1 and mid+M.
   //Except in case of integer komi, the value can be split between two adjacent labels based on value of draw.
   //Arbitrary if C27 has weight 0.
   NumpyBuffer<int8_t> scoreDistrN;

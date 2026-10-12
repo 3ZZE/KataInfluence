@@ -424,6 +424,25 @@ vector<SearchParams> Setup::loadParams(
     else if(cfg.contains("noResultUtilityReduce"))   params.noResultUtilityReduce = cfg.getDouble("noResultUtilityReduce",        -5.0, 5.0);
     else      params.noResultUtilityReduce=0.0;
 
+    if(cfg.contains("movesLeftSlope"+idxStr)) params.movesLeftSlope = cfg.getDouble("movesLeftSlope"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("movesLeftSlope"))   params.movesLeftSlope = cfg.getDouble("movesLeftSlope", 0.0, 1.0);
+    else params.movesLeftSlope = 0.0;
+    if(cfg.contains("movesLeftMaxEffect"+idxStr)) params.movesLeftMaxEffect = cfg.getDouble("movesLeftMaxEffect"+idxStr, 0.0, 1.0);
+    else if(cfg.contains("movesLeftMaxEffect"))   params.movesLeftMaxEffect = cfg.getDouble("movesLeftMaxEffect", 0.0, 1.0);
+    else params.movesLeftMaxEffect = 0.0345;
+    if(cfg.contains("movesLeftThreshold"+idxStr)) params.movesLeftThreshold = cfg.getDouble("movesLeftThreshold"+idxStr, 0.0, 0.999);
+    else if(cfg.contains("movesLeftThreshold"))   params.movesLeftThreshold = cfg.getDouble("movesLeftThreshold", 0.0, 0.999);
+    else params.movesLeftThreshold = 0.8;
+    if(cfg.contains("movesLeftConstantFactor"+idxStr)) params.movesLeftConstantFactor = cfg.getDouble("movesLeftConstantFactor"+idxStr, -1.0, 2.0);
+    else if(cfg.contains("movesLeftConstantFactor"))   params.movesLeftConstantFactor = cfg.getDouble("movesLeftConstantFactor", -1.0, 2.0);
+    else params.movesLeftConstantFactor = 0.0;
+    if(cfg.contains("movesLeftScaledFactor"+idxStr)) params.movesLeftScaledFactor = cfg.getDouble("movesLeftScaledFactor"+idxStr, -2.0, 4.0);
+    else if(cfg.contains("movesLeftScaledFactor"))   params.movesLeftScaledFactor = cfg.getDouble("movesLeftScaledFactor", -2.0, 4.0);
+    else params.movesLeftScaledFactor = 1.6521;
+    if(cfg.contains("movesLeftQuadraticFactor"+idxStr)) params.movesLeftQuadraticFactor = cfg.getDouble("movesLeftQuadraticFactor"+idxStr, -2.0, 4.0);
+    else if(cfg.contains("movesLeftQuadraticFactor"))   params.movesLeftQuadraticFactor = cfg.getDouble("movesLeftQuadraticFactor", -2.0, 4.0);
+    else params.movesLeftQuadraticFactor = 0.0;
+
     if(cfg.contains("cpuctExploration"+idxStr)) params.cpuctExploration = cfg.getDouble("cpuctExploration"+idxStr, 0.0, 10.0);
     else if(cfg.contains("cpuctExploration"))   params.cpuctExploration = cfg.getDouble("cpuctExploration",        0.0, 10.0);
     else                                        params.cpuctExploration = 1.0;

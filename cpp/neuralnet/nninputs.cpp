@@ -58,6 +58,7 @@ NNOutput::NNOutput(const NNOutput& other) {
   whiteWinProb = other.whiteWinProb;
   whiteLossProb = other.whiteLossProb;
   whiteNoResultProb = other.whiteNoResultProb;
+  movesLeft = other.movesLeft;
   varTimeLeft = other.varTimeLeft;
   shorttermWinlossError = other.shorttermWinlossError;
 
@@ -86,6 +87,7 @@ NNOutput::NNOutput(const vector<shared_ptr<NNOutput>>& others) {
   whiteWinProb = 0.0f;
   whiteLossProb = 0.0f;
   whiteNoResultProb = 0.0f;
+  movesLeft = 0.0f;
   varTimeLeft = 0.0f;
   shorttermWinlossError = 0.0f;
   for(int i = 0; i < len; i++) {
@@ -93,12 +95,14 @@ NNOutput::NNOutput(const vector<shared_ptr<NNOutput>>& others) {
     whiteWinProb += other.whiteWinProb;
     whiteLossProb += other.whiteLossProb;
     whiteNoResultProb += other.whiteNoResultProb;
+    movesLeft += other.movesLeft;
     varTimeLeft += other.varTimeLeft;
     shorttermWinlossError += other.shorttermWinlossError;
   }
   whiteWinProb /= floatLen;
   whiteLossProb /= floatLen;
   whiteNoResultProb /= floatLen;
+  movesLeft /= floatLen;
   varTimeLeft /= floatLen;
   shorttermWinlossError /= floatLen;
 
@@ -142,6 +146,7 @@ NNOutput& NNOutput::operator=(const NNOutput& other) {
   whiteWinProb = other.whiteWinProb;
   whiteLossProb = other.whiteLossProb;
   whiteNoResultProb = other.whiteNoResultProb;
+  movesLeft = other.movesLeft;
   varTimeLeft = other.varTimeLeft;
   shorttermWinlossError = other.shorttermWinlossError;
 
@@ -172,6 +177,7 @@ void NNOutput::debugPrint(ostream& out, const Board& board) {
   out << "Win " << Global::strprintf("%.2fc", whiteWinProb * 100) << endl;
   out << "Loss " << Global::strprintf("%.2fc", whiteLossProb * 100) << endl;
   out << "NoResult " << Global::strprintf("%.2fc", whiteNoResultProb * 100) << endl;
+  out << "MovesLeft " << Global::strprintf("%.1f", movesLeft) << endl;
   out << "VarTimeLeft " << Global::strprintf("%.1f", varTimeLeft) << endl;
   out << "STWinlossError " << Global::strprintf("%.3f", shorttermWinlossError) << endl;
 

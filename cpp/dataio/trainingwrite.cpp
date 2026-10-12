@@ -289,12 +289,16 @@ void TrainingWriteBuffers::addRow(
   NNEvaluator* distillEval
 
 ) {
-  (void)finalBoard;
   static_assert(NNModelVersion::latestInputsVersionImplemented == 102, "");
   if(inputsVersion < 3 || inputsVersion > 102)
     throw StringError("Training write buffers: Does not support input version: " + Global::intToString(inputsVersion));
 
   int posArea = dataXLen*dataYLen;
+  //Completed player turns from this position to the end of the game, capped to the score distribution range
+  const bool hasMovesLeftTarget = finalBoard != NULL && !isSidePosition;
+  const int maxMovesLeftTarget = posArea + NNPos::EXTRA_SCORE_DISTR_RADIUS - 1;
+  const int movesLeft =
+    hasMovesLeftTarget ? std::min(std::max(0, finalBoard->turnNumber - board.turnNumber), maxMovesLeftTarget) : 0;
   assert(data.hasFullData);
   assert(curRows < maxRows);
 
@@ -378,15 +382,24 @@ void TrainingWriteBuffers::addRow(
       whiteValueTargets, whiteValueTargetsIdx, nextPlayer, 1.0 / (1.0 + boardArea * 0.016), rowGlobal + 12);
     fillValueTDTargets(whiteValueTargets, whiteValueTargetsIdx, nextPlayer, 1.0, rowGlobal + 16);
 
+    // Moves left: the score slots (C3, td scores, score distribution) hold the number of player turns from this
+    // position until the game ended, so the scoremean head predicts game length (search uses it to finish won
+    // games faster). Side positions have no game end, so they get no weight (C27 = 0).
+    for(int t = 0; t < 5; t++)
+      rowGlobal[4 * t + 3] = (float)movesLeft;
+
     // Lead
     rowGlobal[21] = 0.0f;
     rowGlobal[29] = 0.0f;
 
-    // Expected time of arrival of winloss variance, in turns
+    // Expected time of arrival of winloss variance, in turns.
+    // Influence: count player turns, not moves (a turn is dozens of moves, mostly reinforcement points), when the
+    // future boards are known. Only weighted by C27, which needs them too.
     {
       double sum = 0.0;
       for(int i = whiteValueTargetsIdx + 1; i < whiteValueTargets.size(); i++) {
-        int turnsFromNow = i - whiteValueTargetsIdx;
+        int turnsFromNow =
+          posHistForFutureBoards != NULL ? (*posHistForFutureBoards)[i].turnNumber - board.turnNumber : i - whiteValueTargetsIdx;
         const ValueTargets& prevTargets = whiteValueTargets[i - 1];
         const ValueTargets& targets = whiteValueTargets[i];
         double prevWL = prevTargets.win - prevTargets.loss;
@@ -464,11 +477,12 @@ void TrainingWriteBuffers::addRow(
     assert(64 == GLOBAL_TARGET_NUM_CHANNELS);
 
     int scoreDistrLen = posArea * 2 + NNPos::EXTRA_SCORE_DISTR_RADIUS * 2;
-    // int scoreDistrMid = posArea + NNPos::EXTRA_SCORE_DISTR_RADIUS;
+    int scoreDistrMid = posArea + NNPos::EXTRA_SCORE_DISTR_RADIUS;
     int8_t* rowScoreDistr = scoreDistrN.data + curRows * scoreDistrLen;
     int8_t* rowOwnership = valueTargetsNCHW.data + curRows * VALUE_SPATIAL_TARGET_NUM_CHANNELS * posArea;
 
-    rowGlobal[27] = 0.0f;
+    // C27 weights the final ownership, moves left (score slots) and the other end-of-game targets
+    rowGlobal[27] = hasMovesLeftTarget ? 1.0f : 0.0f;
     rowGlobal[20] = 0.0f;
 
     // Fill with zeros in case the buffers differ in size
@@ -478,6 +492,25 @@ void TrainingWriteBuffers::addRow(
     // Fill score vector "onehot"-like
     for(int i = 0; i < scoreDistrLen; i++)
       rowScoreDistr[i] = 0;
+
+    if(hasMovesLeftTarget) {
+      // Bin i covers [i - mid, i - mid + 1), so an integer split over the two bins around it has mean movesLeft
+      assert(scoreDistrMid + movesLeft < scoreDistrLen && scoreDistrMid + movesLeft - 1 >= 0);
+      rowScoreDistr[scoreDistrMid + movesLeft - 1] = 50;
+      rowScoreDistr[scoreDistrMid + movesLeft] = 50;
+
+      // Final ownership (channel 0) from the perspective of the player to move, no seki (channel 1)
+      for(int y = 0; y < board.y_size; y++) {
+        for(int x = 0; x < board.x_size; x++) {
+          int pos = NNPos::xyToPos(x, y, dataXLen);
+          Loc loc = Location::getLoc(x, y, board.x_size);
+          if(finalBoard->colors[loc] == nextPlayer)
+            rowOwnership[pos] = 1;
+          else if(finalBoard->colors[loc] == getOpp(nextPlayer))
+            rowOwnership[pos] = -1;
+        }
+      }
+    }
 
     if(posHistForFutureBoards == NULL) {
       rowGlobal[33] = 0.0f;

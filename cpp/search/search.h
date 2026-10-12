@@ -102,6 +102,10 @@ struct Search {
   int64_t lastSearchNumPlayouts;
   double effectiveSearchTimeCarriedOver; //Effective search time carried over from previous moves due to ponder/tree reuse
 
+  //Moves-left utility state, fixed for each search by computeRootValues (see SearchParams::movesLeftSlope)
+  double movesLeftRootM;      //Predicted turns left at the root
+  double movesLeftRootFactor; //-sign(rootWL) * shape(|rootWL|), 0 when the bonus is off or the root is undecided
+
   std::string randSeed;
 
 
@@ -373,6 +377,7 @@ private:
   double getResultUtility(double winlossValue, double noResultValue) const;
   double getResultUtilityFromNN(const NNOutput& nnOutput) const;
   double getUtilityFromNN(const NNOutput& nnOutput) const;
+  double getMovesLeftUtility(double movesLeft) const;
 
   //----------------------------------------------------------------------------------------
   // Miscellaneous search biasing helpers, root move selection, etc.
@@ -498,6 +503,7 @@ private:
     SearchNode& node,
     double winLossValue,
     double noResultValue,
+    double movesLeft,
     double weight,
     bool isTerminal,
     bool assumeNoExistingWeight

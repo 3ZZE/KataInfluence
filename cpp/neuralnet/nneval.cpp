@@ -488,6 +488,7 @@ void NNEvaluator::serve(
         double whiteLossProb = 0.0 + rand.nextGaussian() * 0.20;
         double whiteNoResultProb = 0.0 + rand.nextGaussian() * 0.20;
         double varTimeLeft = 0.5 * boardXSize * boardYSize;
+        resultBuf->result->movesLeft = 0.0f;
         resultBuf->result->whiteWinProb = (float)whiteWinProb;
         resultBuf->result->whiteLossProb = (float)whiteLossProb;
         resultBuf->result->whiteNoResultProb = (float)whiteNoResultProb;
@@ -773,12 +774,14 @@ void NNEvaluator::evaluate(
       double winProb;
       double lossProb;
       double noResultProb;
+      double movesLeft;
       double varTimeLeft;
       double shorttermWinlossError;
       {
         double winLogits = buf.result->whiteWinProb;
         double lossLogits = buf.result->whiteLossProb;
         double noResultLogits = buf.result->whiteNoResultProb;
+        double movesLeftPreScaled = buf.result->movesLeft;
         double varTimeLeftPreSoftplus = buf.result->varTimeLeft;
         double shorttermWinlossErrorPreSoftplus = buf.result->shorttermWinlossError;
 
@@ -797,6 +800,8 @@ void NNEvaluator::evaluate(
 
 
 
+        //Same multiplier as scoremean_multiplier in model_pytorch.py. Moves left can't be negative.
+        movesLeft = std::max(0.0, movesLeftPreScaled * 20.0);
         varTimeLeft = softPlus(varTimeLeftPreSoftplus) * 40.0;
 
 
@@ -809,6 +814,7 @@ void NNEvaluator::evaluate(
 
         if(
           !isfinite(probSum) ||
+          !isfinite(movesLeftPreScaled) ||
           !isfinite(varTimeLeft) ||
           !isfinite(shorttermWinlossError) 
         ) {
@@ -832,6 +838,7 @@ void NNEvaluator::evaluate(
         buf.result->whiteNoResultProb = (float)noResultProb;
       }
 
+      buf.result->movesLeft = (float)movesLeft;
       if(modelVersion >= 9) {
         buf.result->varTimeLeft = (float)varTimeLeft;
         buf.result->shorttermWinlossError = (float)shorttermWinlossError;
