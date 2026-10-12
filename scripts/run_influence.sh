@@ -9,9 +9,9 @@ LR_SCALE=2.0
 
 # Per generation. KataGomo guideline: ~100 trained samples per selfplay game,
 # check that vloss_val - vloss_train < 0.05 (else more games or fewer samples).
-GAMES_PER_GEN=2000   # >> numGameThreads (768), so the end-of-generation tail with few running games stays short
-SAMPLES_PER_EPOCH=300000
-export KEEP_TARGET_ROWS=330000   # slightly above SAMPLES_PER_EPOCH
+GAMES_PER_GEN=3000   # >> numGameThreads (768), so the end-of-generation tail with few running games stays short
+SAMPLES_PER_EPOCH=600000   # val vloss <= train vloss after 7 gens, each gen adds 0.6-0.9M rows
+export KEEP_TARGET_ROWS=660000   # slightly above SAMPLES_PER_EPOCH
 export MIN_ROWS=150000
 
 mkdir -p data/selfplay/ data/models/
@@ -37,7 +37,8 @@ done
 # Sizing notes (2026-10, measured on the 2080 Ti VPS, CUDA backend, b10c128, 1st trained net):
 # - selfplay.cfg 768 game threads / batch 384 / 2 NN server threads: ~36k evals/s
 #   (128/128/1 gave 22k). Fits in 16 GB RAM only with COMPILE_MAX_BOARD_LEN 11.
-# - Games are still ~3k moves; a move costs ~35-40 evals, so ~2000 games take very roughly 3h.
+# - Games are ~2k moves; a move costs ~30 evals (cheapSearchProb 0.85 / reinforceCheapSearchProb 0.95,
+#   ~38 with 0.75 / 0.9). 3000 games per generation take ~1h of selfplay + ~6 min shuffle/train.
 #   Generations get faster as games shorten.
 # - If generations are much slower or faster, scale GAMES_PER_GEN and SAMPLES_PER_EPOCH together,
 #   but keep GAMES_PER_GEN well above numGameThreads.
