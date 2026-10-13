@@ -135,6 +135,7 @@ struct SearchNode {
   //Constant during search--------------------------------------------------------------
   const Player nextPla;
   const bool forceNonTerminal;
+  const int32_t turnNumber; //Board::turnNumber of this position, for the moves-left utility
   Hash128 patternBonusHash;
   const uint32_t mutexIdx; // For lookup into mutex pool
 
@@ -187,7 +188,7 @@ struct SearchNode {
   std::atomic<int32_t> dirtyCounter;
 
   //--------------------------------------------------------------------------------
-  SearchNode(Player prevPla, bool forceNonTerminal, uint32_t mutexIdx);
+  SearchNode(Player prevPla, bool forceNonTerminal, int turnNumber, uint32_t mutexIdx);
   SearchNode(const SearchNode&, bool forceNonTerminal, bool copySubtreeValueBias);
   ~SearchNode();
 

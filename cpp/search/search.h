@@ -104,6 +104,7 @@ struct Search {
 
   //Moves-left utility state, fixed for each search by computeRootValues (see SearchParams::movesLeftSlope)
   double movesLeftRootM;      //Predicted turns left at the root
+  int movesLeftRootTurn;      //Board::turnNumber of the root
   double movesLeftRootFactor; //-sign(rootWL) * shape(|rootWL|), 0 when the bonus is off or the root is undecided
 
   std::string randSeed;
@@ -376,8 +377,8 @@ private:
   //----------------------------------------------------------------------------------------
   double getResultUtility(double winlossValue, double noResultValue) const;
   double getResultUtilityFromNN(const NNOutput& nnOutput) const;
-  double getUtilityFromNN(const NNOutput& nnOutput) const;
-  double getMovesLeftUtility(double movesLeft) const;
+  double getUtilityFromNN(const NNOutput& nnOutput, int turnNumber) const;
+  double getMovesLeftUtility(double movesLeft, int turnNumber) const;
 
   //----------------------------------------------------------------------------------------
   // Miscellaneous search biasing helpers, root move selection, etc.

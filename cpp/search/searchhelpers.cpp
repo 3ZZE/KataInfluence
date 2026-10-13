@@ -238,17 +238,20 @@ double Search::getResultUtilityFromNN(const NNOutput& nnOutput) const {
 }
 
 
-double Search::getUtilityFromNN(const NNOutput& nnOutput) const {
+double Search::getUtilityFromNN(const NNOutput& nnOutput, int turnNumber) const {
   double resultUtility = getResultUtilityFromNN(nnOutput);
-  return resultUtility + getMovesLeftUtility(nnOutput.movesLeft);
+  return resultUtility + getMovesLeftUtility(nnOutput.movesLeft, turnNumber);
 }
 
-//White-perspective bonus for a position predicted to end the game in movesLeft turns, relative to the root
-double Search::getMovesLeftUtility(double movesLeft) const {
+//White-perspective bonus for a position at turnNumber predicted to end the game in movesLeft more turns.
+//Compares the predicted game end (turns played since the root + turns left) with the root's prediction. Comparing
+//turns left alone would favor lines that reach later turns in fewer tree levels, such as ending the attack phase early.
+double Search::getMovesLeftUtility(double movesLeft, int turnNumber) const {
   if(movesLeftRootFactor == 0.0)
     return 0.0;
   double cap = searchParams.movesLeftMaxEffect;
-  double m = std::min(cap, std::max(-cap, searchParams.movesLeftSlope * (movesLeft - movesLeftRootM)));
+  double turnsFromRoot = movesLeft + (turnNumber - movesLeftRootTurn);
+  double m = std::min(cap, std::max(-cap, searchParams.movesLeftSlope * (turnsFromRoot - movesLeftRootM)));
   return movesLeftRootFactor * m;
 }
 

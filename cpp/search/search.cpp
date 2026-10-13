@@ -78,6 +78,7 @@ Search::Search(SearchParams params, NNEvaluator* nnEval, Logger* lg, const strin
    lastSearchNumPlayouts(0),
    effectiveSearchTimeCarriedOver(0.0),
    movesLeftRootM(0.0),
+   movesLeftRootTurn(0),
    movesLeftRootFactor(0.0),
    randSeed(rSeed),
    valueWeightDistribution(NULL),
@@ -610,7 +611,7 @@ void Search::beginSearch(bool pondering) {
     //Avoid storing the root node in the nodeTable, guarantee that it never is part of a cycle, allocate it directly.
     //Also force that it is non-terminal.
     const bool forceNonTerminal = true;
-    rootNode = new SearchNode(rootPla, forceNonTerminal, createMutexIdxForNode(dummyThread));
+    rootNode = new SearchNode(rootPla, forceNonTerminal, rootBoard.turnNumber, createMutexIdxForNode(dummyThread));
   }
   else {
     //If the root node has any existing children, then prune things down if there are moves that should not be allowed at the root.
@@ -724,10 +725,12 @@ void Search::beginSearch(bool pondering) {
   //search's values, so recompute them (like upstream KataGo does for its dynamic score center).
   double oldMovesLeftRootFactor = movesLeftRootFactor;
   double oldMovesLeftRootM = movesLeftRootM;
+  int oldMovesLeftRootTurn = movesLeftRootTurn;
   computeRootValues();
   if(
     rootNode != NULL && patternBonusTable == NULL &&
-    (movesLeftRootFactor != oldMovesLeftRootFactor || (movesLeftRootFactor != 0.0 && movesLeftRootM != oldMovesLeftRootM))
+    (movesLeftRootFactor != oldMovesLeftRootFactor ||
+     (movesLeftRootFactor != 0.0 && (movesLeftRootM != oldMovesLeftRootM || movesLeftRootTurn != oldMovesLeftRootTurn)))
   ) {
     recursivelyRecomputeStats(*rootNode);
   }
@@ -742,6 +745,7 @@ void Search::beginSearch(bool pondering) {
 
 void Search::computeRootValues() {
   movesLeftRootM = 0.0;
+  movesLeftRootTurn = rootBoard.turnNumber;
   movesLeftRootFactor = 0.0;
   if(searchParams.movesLeftSlope <= 0.0)
     return;
@@ -807,7 +811,7 @@ SearchNode* Search::allocateOrFindNode(SearchThread& thread, Player nextPla, Loc
       child = insertLoc->second;
     }
     else {
-      child = new SearchNode(nextPla, forceNonTerminal, createMutexIdxForNode(thread));
+      child = new SearchNode(nextPla, forceNonTerminal, thread.board.turnNumber, createMutexIdxForNode(thread));
 
       //Also perform subtree value bias and pattern bonus handling under the mutex. These parameters are no atomic, so
       //if the node is accessed concurrently by other nodes through the table, we need to make sure these parameters are fully
@@ -967,7 +971,7 @@ void Search::recursivelyRecomputeStats(SearchNode& n) {
         //Childless nodes are either NN leaves or terminal (no turns left)
         const NNOutput* nnOutput = node->getNNOutput();
         double movesLeft = nnOutput != NULL ? nnOutput->movesLeft : 0.0;
-        double resultUtility = getResultUtility(winLossValueAvg, noResultValueAvg) + getMovesLeftUtility(movesLeft);
+        double resultUtility = getResultUtility(winLossValueAvg, noResultValueAvg) + getMovesLeftUtility(movesLeft, node->turnNumber);
         double newUtilityAvg = resultUtility;
         newUtilityAvg += getPatternBonus(node->patternBonusHash,getOpp(node->nextPla));
         double newUtilitySqAvg = newUtilityAvg * newUtilityAvg;
