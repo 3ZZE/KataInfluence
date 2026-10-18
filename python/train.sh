@@ -73,7 +73,7 @@ time python ./train.py \
      -lr-scale 1\
      -samples-per-epoch 2000000 \
     -soft-policy-weight-scale 8.0 \
-    -value-loss-scale 0.6 \
+    -value-loss-scale 0.4 \
     -td-value-loss-scales 0.6,0.6,0.6 \
     -lookahead-alpha 0.5 \
     -lookahead-k 6 \
