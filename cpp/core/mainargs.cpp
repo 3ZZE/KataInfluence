@@ -4,6 +4,7 @@
 
 #ifdef OS_IS_WINDOWS
 #include <codecvt>
+#include <locale>
 #include <windows.h>
 #include <processenv.h>
 #include <shellapi.h>

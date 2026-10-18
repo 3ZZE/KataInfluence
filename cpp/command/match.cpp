@@ -46,7 +46,7 @@ std::string getCurrentTimeString() {
 
   // ת��Ϊ tm �ṹ
   std::tm now_tm;
-#if defined(_MSC_VER)  // MSVC (Visual Studio)
+#if defined(_WIN32)  // MSVC and MinGW
   localtime_s(&now_tm, &now_time_t);
 #else  // GCC/Clang
   localtime_r(&now_time_t, &now_tm);

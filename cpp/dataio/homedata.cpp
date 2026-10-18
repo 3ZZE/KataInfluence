@@ -16,6 +16,7 @@
 // #include <pathcch.h>
 // #pragma comment(lib, "pathcch.lib")
 #include <codecvt>
+#include <locale>
 #endif
 
 #include "../core/makedir.h"
