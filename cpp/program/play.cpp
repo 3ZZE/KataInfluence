@@ -43,7 +43,7 @@ GameInitializer::GameInitializer(ConfigParser& cfg, Logger& logger, const string
 
 void GameInitializer::initShared(ConfigParser& cfg, Logger& logger) {
   //Move limit in player turns, the game is a draw when it is reached
-  maxTurns = cfg.contains("maxTurns") ? cfg.getInt("maxTurns", 0, 100000) : 200;
+  maxTurns = cfg.contains("maxTurns") ? cfg.getInt("maxTurns", 0, 100000) : 180;
   //Starting position variety, see RandomOpening::initStartPosition
   randomStartProb = cfg.contains("randomStartProb") ? cfg.getDouble("randomStartProb", 0.0, 1.0) : 0.0;
   randomWallsProb = cfg.contains("randomWallsProb") ? cfg.getDouble("randomWallsProb", 0.0, 1.0) : 0.0;

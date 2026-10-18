@@ -15,9 +15,15 @@ string CommandLoop::processSingleCommandLine(const string& s) {
 
   line.erase(line.begin()+newLen, line.end());
 
-  //Remove comments
+  //Remove comments, except in set_board where '#' is a wall (the command may be preceded by a numeric id)
+  size_t cmdStart = 0;
+  while(cmdStart < line.length() && Global::isDigit(line[cmdStart]))
+    cmdStart++;
+  while(cmdStart < line.length() && (line[cmdStart] == ' ' || line[cmdStart] == '\t'))
+    cmdStart++;
+  bool isSetBoard = line.compare(cmdStart, 9, "set_board") == 0;
   size_t commentPos = line.find("#");
-  if(commentPos != string::npos)
+  if(commentPos != string::npos && !isSetBoard)
     line = line.substr(0, commentPos);
 
   //Convert tabs to spaces
