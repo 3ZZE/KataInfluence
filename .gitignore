@@ -102,3 +102,12 @@ watchgame.txt
 models/
 python/startposesupload.txt
 
+
+# Influence
+*.pem
+promt.txt
+draws/
+matchresult/
+/release/
+scripts/rating/rating_state*
+!gui/gtp.cfg
