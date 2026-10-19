@@ -6,11 +6,15 @@
 
 #include "../external/nlohmann_json/json.hpp"
 
-//Influence rules. The game itself has no options, the only setting is the technical move limit.
+//Influence rules. The base game has no options, the settings are the technical move limit
+//and an optional variant that forbids ending the attack phase early.
 struct Rules {
   //Maximum number of player turns (one turn = attack phase + reinforce phase).
   //When reached the game is a draw. 0 = unlimited.
   int maxMoves;
+  //Variant: pass (ending the attack phase) is illegal while any attack is still legal,
+  //so a player must keep attacking as long as they can.
+  bool forbidPassUnlessNoOtherMove;
 
   Rules();
   explicit Rules(int maxMoves);
@@ -34,6 +38,7 @@ struct Rules {
   nlohmann::json toJson() const;
 
   static const Hash128 ZOBRIST_MAXMOVES_HASH_BASE;
+  static const Hash128 ZOBRIST_FORBID_PASS_HASH;
 };
 
 #endif  // GAME_RULES_H_

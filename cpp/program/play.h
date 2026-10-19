@@ -102,6 +102,7 @@ class GameInitializer {
 
   
   int maxTurns;
+  bool forbidPassUnlessNoOtherMove;
   double randomStartProb;
   double randomWallsProb;
   double randomWallsMaxDensity;

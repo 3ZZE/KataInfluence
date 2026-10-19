@@ -9,14 +9,15 @@ using json = nlohmann::json;
 
 Rules::Rules() {
   maxMoves = 0;
+  forbidPassUnlessNoOtherMove = false;
 }
 
-Rules::Rules(int mm) : maxMoves(mm) {}
+Rules::Rules(int mm) : maxMoves(mm), forbidPassUnlessNoOtherMove(false) {}
 
 Rules::~Rules() {}
 
 bool Rules::operator==(const Rules& other) const {
-  return maxMoves == other.maxMoves;
+  return maxMoves == other.maxMoves && forbidPassUnlessNoOtherMove == other.forbidPassUnlessNoOtherMove;
 }
 
 bool Rules::operator!=(const Rules& other) const {
@@ -33,6 +34,8 @@ Rules Rules::getDefault() {
 
 ostream& operator<<(ostream& out, const Rules& rules) {
   out << "maxmoves" << rules.maxMoves;
+  if(rules.forbidPassUnlessNoOtherMove)
+    out << "forbidpass";
   return out;
 }
 
@@ -45,6 +48,7 @@ string Rules::toString() const {
 json Rules::toJson() const {
   json ret;
   ret["maxmoves"] = maxMoves;
+  ret["forbidPassUnlessNoOtherMove"] = forbidPassUnlessNoOtherMove;
   return ret;
 }
 
@@ -60,6 +64,11 @@ Rules Rules::updateRules(const string& k, const string& v, Rules oldRules) {
     rules.maxMoves = Global::stringToInt(value);
     if(rules.maxMoves < 0)
       throw IOError("maxmoves must be >= 0");
+  } else if(key == "forbidpassunlessnoothermove" || key == "forbidpass") {
+    if(value == "1" || value == "0")
+      rules.forbidPassUnlessNoOtherMove = value == "1";
+    else if(!Global::tryStringToBool(value, rules.forbidPassUnlessNoOtherMove))
+      throw IOError("Could not parse " + key + " value: " + v);
   } else
     throw IOError("Unknown rules option: " + key);
   return rules;
@@ -82,7 +91,13 @@ static Rules parseRulesHelper(const string& sOrig) {
       throw IOError("Could not parse rules: " + sOrig);
     }
   } else if(Global::isPrefix(lowercased, "maxmoves")) {
-    rules.maxMoves = Global::stringToInt(lowercased.substr(8));
+    //Short form as written by toString, e.g. "maxmoves180" or "maxmoves180forbidpass"
+    string rest = lowercased.substr(8);
+    if(Global::isSuffix(rest, "forbidpass")) {
+      rules.forbidPassUnlessNoOtherMove = true;
+      rest = rest.substr(0, rest.size() - 10);
+    }
+    rules.maxMoves = Global::stringToInt(rest);
   } else {
     throw IOError("Could not parse rules: " + sOrig);
   }
@@ -111,3 +126,4 @@ string Rules::toStringMaybeNice() const {
 }
 
 const Hash128 Rules::ZOBRIST_MAXMOVES_HASH_BASE = Hash128(0x8aba00580c378fe8ULL, 0x7f6c1210e74fb440ULL);
+const Hash128 Rules::ZOBRIST_FORBID_PASS_HASH = Hash128(0x7c3e9a51d02b84f6ULL, 0x1f86c4e3a95d2b07ULL);

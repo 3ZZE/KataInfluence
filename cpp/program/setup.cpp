@@ -707,7 +707,7 @@ Rules Setup::loadSingleRules(
   Rules rules;
 
   if(cfg.contains("rules")) {
-    if(cfg.contains("maxMoves"))
+    if(cfg.contains("maxMoves") || cfg.contains("forbidPassUnlessNoOtherMove"))
       throw StringError("Cannot both specify 'rules' and individual rules like maxMoves");
 
     rules = Rules::parseRules(cfg.getString("rules"));
@@ -718,6 +718,7 @@ Rules Setup::loadSingleRules(
     } else {
       rules.maxMoves = 0;
     }
+    rules.forbidPassUnlessNoOtherMove = cfg.contains("forbidPassUnlessNoOtherMove") ? cfg.getBool("forbidPassUnlessNoOtherMove") : false;
   }
 
 

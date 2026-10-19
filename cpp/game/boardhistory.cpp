@@ -196,6 +196,9 @@ void BoardHistory::setWinner(Player pla) {
 bool BoardHistory::isLegal(const Board& board, Loc moveLoc, Player movePla) const {
   if(!board.isLegal(moveLoc,movePla))
     return false;
+  //Variant rule: pass (only ever legal in STAGE_ATTACK_SELECT) is illegal while any attack is available
+  if(rules.forbidPassUnlessNoOtherMove && moveLoc == Board::PASS_LOC && board.anyAttackAvailable(movePla))
+    return false;
 
   return true;
 }
@@ -260,5 +263,7 @@ Hash128 BoardHistory::getRulesHash() const
 {
   Hash128 hash=Hash128();
   hash ^= Hash128::mixInt(Rules::ZOBRIST_MAXMOVES_HASH_BASE,rules.maxMoves);
+  if(rules.forbidPassUnlessNoOtherMove)
+    hash ^= Rules::ZOBRIST_FORBID_PASS_HASH;
   return hash;
 }
