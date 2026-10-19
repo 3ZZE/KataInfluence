@@ -233,6 +233,39 @@ impl Board {
         true
     }
 
+    /// Random rules variant (GUI only, the engine knows only the standard rules): the chance that an
+    /// attack on an enemy cell captures it when the strengths are at most 1 apart, None when the outcome
+    /// is certain (empty target, or strengths 2 or more apart).
+    pub fn capture_chance(&self, src: (usize, usize), dst: (usize, usize)) -> Option<f64> {
+        let t = self.cell(dst.0, dst.1);
+        if t.v == 0 {
+            return None;
+        }
+        match self.cell(src.0, src.1).strength() - t.strength() {
+            1 => Some(0.75),
+            0 => Some(0.5),
+            -1 => Some(0.25),
+            _ => None,
+        }
+    }
+
+    /// `attack` under the random rules: a close fight (see `capture_chance`) leaves the source at 1 and the
+    /// target at 1 for the winner, so it never becomes empty; the attacker wins when `roll` (in [0, 1)) is
+    /// below the chance. Any other attack is resolved as in the standard rules.
+    pub fn attack_random(&mut self, x: usize, y: usize, roll: f64) -> bool {
+        let Stage::AttackTarget(sx, sy) = self.stage else { return false };
+        if !self.can_attack((sx, sy), (x, y)) {
+            return false;
+        }
+        let Some(chance) = self.capture_chance((sx, sy), (x, y)) else { return self.attack(x, y) };
+        let sign = self.next.sign();
+        let defender = self.cell(x, y).v.signum();
+        self.cell_mut(x, y).v = if roll < chance { sign } else { defender };
+        self.cell_mut(sx, sy).v = sign;
+        self.stage = Stage::AttackSelect;
+        true
+    }
+
     /// PASS: ends the attack phase.
     pub fn end_attack(&mut self) -> bool {
         if self.stage == Stage::Reinforce {
@@ -533,6 +566,37 @@ mod tests {
         // (1,0) and (0,1) are not adjacent on this hex grid
         assert!(!b.is_adjacent((1, 0), (0, 1)));
         assert!(b.is_adjacent((0, 0), (1, 1)));
+    }
+
+    #[test]
+    fn random_attacks() {
+        let mut b = Board::new(4, 4);
+        b.set_value(0, 0, 4);
+        b.set_value(1, 0, -3);
+        b.set_value(0, 1, -4);
+        b.set_value(1, 1, -5);
+        b.set_value(3, 3, -2);
+        assert_eq!(b.capture_chance((0, 0), (1, 0)), Some(0.75));
+        assert_eq!(b.capture_chance((0, 0), (0, 1)), Some(0.5));
+        assert_eq!(b.capture_chance((0, 0), (1, 1)), Some(0.25));
+        assert_eq!(b.capture_chance((0, 0), (1, 2)), None);
+        // 4B -> 5R: the attacker wins with roll < 0.25, else the defender keeps the cell at 1
+        for (roll, target) in [(0.2, 1), (0.3, -1)] {
+            let mut c = b.clone();
+            assert!(c.select(0, 0));
+            assert!(c.attack_random(1, 1, roll));
+            assert_eq!((c.cell(1, 1).v, c.cell(0, 0).v), (target, 1));
+        }
+        // 4B -> 4R never empties the target
+        let mut c = b.clone();
+        c.select(0, 0);
+        c.attack_random(0, 1, 0.7);
+        assert_eq!(c.cell(0, 1).v, -1);
+        // strengths 2 apart: standard rules
+        b.set_value(1, 0, -2);
+        b.select(0, 0);
+        b.attack_random(1, 0, 0.99);
+        assert_eq!((b.cell(1, 0).v, b.cell(0, 0).v), (2, 1));
     }
 
     #[test]

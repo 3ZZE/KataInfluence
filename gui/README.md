@@ -53,6 +53,15 @@ Space ends the attack phase, then click own cells to spend reinforcement points
 Z / Y (or Left / Right) undo and redo, Shift+Z / Y or PageUp / PageDown step a whole turn, Home / End jump to
 the start / end of the history; the keys repeat while held. A white dot marks the cell the last step changed.
 
+Random rules (`Rules: standard / random` button): a variant only the GUI knows. An attack on an enemy cell
+whose strength is at most 1 away from the attacker's is decided by chance: the attacker captures it with
+75% (attacker 1 stronger), 50% (equal) or 25% (attacker 1 weaker). Either way the source drops to 1 and the
+target ends at strength 1 for whoever won it, so an owned cell never becomes empty again. All other attacks
+and the rest of the rules are unchanged. They apply to every attack played in the GUI, including the
+engines'. The engines still search with the standard rules; after an engine attack the GUI resolves it
+with the random rules and sends the engine the actual position (`set_board`) before its next move. Replays and the
+analysis PV arrows use the standard rules.
+
 Edit mode (E): LMB/RMB change a cell's value by +1/-1, MMB clears it, Shift+LMB toggles a wall,
 arrows resize the board, T swaps the side to move, C clears the board.
 

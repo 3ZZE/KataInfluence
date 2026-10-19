@@ -111,6 +111,8 @@ struct App {
     analyze: bool,
     /// Engine that runs the analysis.
     analysis_engine: usize,
+    /// Random rules variant (`Board::attack_random`) for all attacks played here, by hand or by an engine.
+    random_rules: bool,
     /// Move and SGF comment of a loaded game (--replay), by the position text after the move.
     notes: HashMap<String, String>,
     /// Game index, result and players of the loaded game.
@@ -131,6 +133,7 @@ impl App {
             players: [None, None],
             analyze: false,
             analysis_engine: 0,
+            random_rules: false,
             notes: HashMap::new(),
             game_info: String::new(),
             repeat: None,
@@ -207,13 +210,44 @@ impl App {
             self.players = [None, None];
             return;
         }
+        // The engine has played the move under the standard rules. If the random rules give another
+        // result, the engine is told the real position with set_board before it is asked anything.
         if let Some(ctl) = self.engines[i].ctl.as_mut() {
             ctl.mark_synced(&after);
         }
         // ignore the move if the board changed while the engine was thinking
         if pos == self.board {
-            self.change(|b| *b = after);
+            if let (Stage::AttackTarget(..), Some(Move::Cell(x, y))) = (pos.stage, Move::parse(&vertex, pos.w, pos.h)) {
+                self.attack(x, y);
+            } else {
+                self.change(|b| *b = after);
+            }
         }
+    }
+
+    /// Attacks (x, y) from the selected source, under the random rules if they are on.
+    fn attack(&mut self, x: usize, y: usize) {
+        let Stage::AttackTarget(sx, sy) = self.board.stage else { return };
+        let chance = self.board.capture_chance((sx, sy), (x, y)).filter(|_| self.random_rules);
+        let Some(chance) = chance else {
+            self.change(|b| {
+                b.attack(x, y);
+            });
+            return;
+        };
+        let roll = macroquad::rand::gen_range(0.0, 1.0);
+        let pla = self.board.next;
+        self.change(|b| {
+            b.attack_random(x, y, roll);
+        });
+        let won = self.board.cell(x, y).owner() == Some(pla);
+        self.message = format!(
+            "{} attack {}: {:.0}% chance, {}",
+            pla.name(),
+            Move::Cell(x, y).to_gtp(self.board.h),
+            chance * 100.0,
+            if won { "captured" } else { "failed" }
+        );
     }
 
     /// Current analysis, if it belongs to the board on screen.
@@ -386,12 +420,15 @@ impl App {
                     self.change(|b| b.cancel_select());
                 } else if self.board.can_attack((sx, sy), (x, y)) {
                     // chain: select the captured cell if it can attack, else keep the source (overflow)
-                    self.change(|b| {
-                        b.attack(x, y);
-                        if !b.select(x, y) {
-                            b.select(sx, sy);
-                        }
-                    });
+                    self.attack(x, y);
+                    // one history step per click: the selection goes with the attack
+                    let mut b = self.board.clone();
+                    if !b.select(x, y) {
+                        b.select(sx, sy);
+                    }
+                    if b != self.board {
+                        self.board = b;
+                    }
                 } else {
                     // clicking another own source switches the selection
                     self.change(|b| {
@@ -778,6 +815,9 @@ impl App {
             let c = b.cell(hx, hy);
             if let Stage::AttackTarget(sx, sy) = b.stage {
                 if !self.edit && b.can_attack((sx, sy), (hx, hy)) {
+                    if let Some(chance) = b.capture_chance((sx, sy), (hx, hy)).filter(|_| self.random_rules) {
+                        return format!("attack: {:.0}% capture, target -> 1, source -> 1", chance * 100.0);
+                    }
                     let r = b.attack_result((sx, sy), (hx, hy));
                     return format!("attack: target {:+} -> {:+}, source -> {}", c.v, r.target_v, r.source_v.abs());
                 }
@@ -830,6 +870,11 @@ impl App {
         }
         if self.button("Paste [^V]", x2, y, bw, true) {
             self.paste();
+        }
+        y += 34.0;
+        let rules = if self.random_rules { "Rules: random" } else { "Rules: standard" };
+        if self.button(rules, x, y, PANEL_W - 32.0, true) {
+            self.random_rules = !self.random_rules;
         }
         y += 34.0;
         if self.edit {
@@ -981,6 +1026,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
 #[macroquad::main(window_conf)]
 async fn main() {
     let mut app = App::new();
+    let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    macroquad::rand::srand(seed);
     let args = parse_args(std::env::args().skip(1)).unwrap_or_else(|e| {
         eprintln!("{e}\n{USAGE}");
         std::process::exit(2);
