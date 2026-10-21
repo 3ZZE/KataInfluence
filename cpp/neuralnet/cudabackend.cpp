@@ -608,6 +608,8 @@ struct MatMulLayer {
   const int inChannels;
   const int outChannels;
   const bool usingFP16;
+  //With FP16, accumulate in FP32 (cublasGemmEx) rather than FP16 (cublasHgemm). Used for the transformer projections.
+  const bool fp32Accumulate;
   void* matBuf;
 
   MatMulLayer() = delete;
@@ -617,12 +619,14 @@ struct MatMulLayer {
   MatMulLayer(
     CudaHandles* cudaHandles,
     const MatMulLayerDesc* desc,
-    bool useFP16
+    bool useFP16,
+    bool useFP32Accumulate = false
   ) :
     name(desc->name),
     inChannels(desc->inChannels),
     outChannels(desc->outChannels),
-    usingFP16(useFP16)
+    usingFP16(useFP16),
+    fp32Accumulate(useFP32Accumulate)
   {
     (void)cudaHandles;
 
@@ -649,14 +653,15 @@ struct MatMulLayer {
     void* inputBuf,
     void* outputBuf,
     void* workspaceBuf,
-    size_t workspaceBytes
+    size_t workspaceBytes,
+    bool accumulate = false
   ) const {
     (void)workspaceBuf;
     (void)workspaceBytes;
 
     if(!usingFP16) {
       const float alpha = 1.0f;
-      const float beta = 0.0f;
+      const float beta = accumulate ? 1.0f : 0.0f;
       CUBLAS_ERR(name.c_str(),cublasSgemm(
         cudaHandles->cublas,
         CUBLAS_OP_N,
@@ -671,9 +676,32 @@ struct MatMulLayer {
         (float*)outputBuf,outChannels
       ));
     }
+    else if(fp32Accumulate) {
+      const float alpha = 1.0f;
+      const float beta = accumulate ? 1.0f : 0.0f;
+      CUBLAS_ERR(name.c_str(),cublasGemmEx(
+        cudaHandles->cublas,
+        CUBLAS_OP_N,
+        CUBLAS_OP_N,
+        outChannels,
+        batchSize,
+        inChannels,
+        &alpha,
+        matBuf,CUDA_R_16F,outChannels,
+        inputBuf,CUDA_R_16F,inChannels,
+        &beta,
+        outputBuf,CUDA_R_16F,outChannels,
+#if CUDART_VERSION >= 11000
+        CUBLAS_COMPUTE_32F,
+#else
+        CUDA_R_32F,
+#endif
+        CUBLAS_GEMM_DEFAULT_TENSOR_OP
+      ));
+    }
     else {
       const half* alpha = (const half*)scratch->oneBuf;
-      const half* beta = (const half*)scratch->zeroBuf;
+      const half* beta = (const half*)(accumulate ? scratch->oneBuf : scratch->zeroBuf);
       CUBLAS_ERR(name.c_str(),cublasHgemm(
         cudaHandles->cublas,
         CUBLAS_OP_N,
@@ -818,6 +846,222 @@ struct NormActConv {
 
 };
 
+
+//---------------------------------------------------------------------------------
+// Transformer layers, ported from upstream KataGo v1.17.0. NHWC only: [n, xy, c] activations are a
+// column-major (c, n*xy) matrix, so the projections are MatMulLayers over n*xy rows, and a
+// [n, xy, heads*headDim] projection is the BSHD layout of the attention kernel.
+// Off-board positions end up exactly 0 in every residual (masked norm output, masked queries).
+
+struct TransformerRMSNormLayer {
+  const string name;
+  const int numChannels;
+  const float epsilon;
+  const bool spatial;
+  const int activation;
+  const int nnXLen;
+  const int nnYLen;
+  const bool usingFP16;
+  void* gammaBuf; //float
+  void* betaBuf; //float
+
+  TransformerRMSNormLayer() = delete;
+  TransformerRMSNormLayer(const TransformerRMSNormLayer&) = delete;
+  TransformerRMSNormLayer& operator=(const TransformerRMSNormLayer&) = delete;
+
+  TransformerRMSNormLayer(
+    const string& n, int numC, float eps, const vector<float>& gamma, const vector<float>& beta,
+    bool isSpatial, int act, int nnX, int nnY, bool useFP16
+  ) :
+    name(n),
+    numChannels(numC),
+    epsilon(eps),
+    spatial(isSpatial),
+    activation(act),
+    nnXLen(nnX),
+    nnYLen(nnY),
+    usingFP16(useFP16)
+  {
+    assert(gamma.size() == numChannels && beta.size() == numChannels);
+    CudaUtils::mallocAndCopyToDevice(name,gamma,gammaBuf,false);
+    CudaUtils::mallocAndCopyToDevice(name,beta,betaBuf,false);
+  }
+  ~TransformerRMSNormLayer() {
+    cudaFree(gammaBuf);
+    cudaFree(betaBuf);
+  }
+
+  void apply(ScratchBuffers* scratch, int batchSize, void* inBuf, void* outBuf, void* maskBuf, float* maskSumBuf) const {
+    int xySize = nnXLen * nnYLen;
+    if(!spatial) {
+      if(!usingFP16)
+        customCudaRMSNormNHWC((const float*)inBuf,(float*)outBuf,(const float*)gammaBuf,(const float*)betaBuf,(const float*)maskBuf,batchSize,xySize,numChannels,epsilon,activation);
+      else
+        customCudaRMSNormNHWC((const half*)inBuf,(half*)outBuf,(const float*)gammaBuf,(const float*)betaBuf,(const half*)maskBuf,batchSize,xySize,numChannels,epsilon,activation);
+    }
+    else {
+      SizedBuf<void*> sumSq(scratch->allocator, scratch->getBufSizeFloat(1));
+      if(!usingFP16)
+        customCudaSpatialRMSNormNHWC((const float*)inBuf,(float*)outBuf,(const float*)gammaBuf,(const float*)betaBuf,(const float*)maskBuf,maskSumBuf,batchSize,xySize,numChannels,epsilon,activation,(float*)sumSq.buf);
+      else
+        customCudaSpatialRMSNormNHWC((const half*)inBuf,(half*)outBuf,(const float*)gammaBuf,(const float*)betaBuf,(const half*)maskBuf,maskSumBuf,batchSize,xySize,numChannels,epsilon,activation,(float*)sumSq.buf);
+    }
+    CUDA_ERR(name.c_str(),cudaPeekAtLastError());
+  }
+};
+
+struct TransformerAttentionBlock {
+  const string name;
+  const int numHeads;
+  const int numKVHeads;
+  const int qHeadDim;
+  const int vHeadDim;
+  const int numChannels;
+  const int nnXLen;
+  const int nnYLen;
+  const bool usingFP16;
+
+  const TransformerRMSNormLayer preLN;
+  const MatMulLayer qProj;
+  const MatMulLayer kProj;
+  const MatMulLayer vProj;
+  const MatMulLayer outProj;
+  void* ropeFreqsBuf; //float, (numKVHeads, qHeadDim/2, 2)
+
+  TransformerAttentionBlock() = delete;
+  TransformerAttentionBlock(const TransformerAttentionBlock&) = delete;
+  TransformerAttentionBlock& operator=(const TransformerAttentionBlock&) = delete;
+
+  TransformerAttentionBlock(CudaHandles* cudaHandles, const TransformerAttentionDesc* desc, int nnX, int nnY, bool useFP16, bool useNHWC) :
+    name(desc->name),
+    numHeads(desc->numHeads),
+    numKVHeads(desc->numKVHeads),
+    qHeadDim(desc->qHeadDim),
+    vHeadDim(desc->vHeadDim),
+    numChannels(desc->preLN.numChannels),
+    nnXLen(nnX),
+    nnYLen(nnY),
+    usingFP16(useFP16),
+    preLN(desc->preLN.name,desc->preLN.numChannels,desc->preLN.epsilon,desc->preLN.weight,vector<float>(desc->preLN.numChannels,0.0f),false,ACTIVATION_IDENTITY,nnX,nnY,useFP16),
+    qProj(cudaHandles,&desc->qProj,useFP16,true),
+    kProj(cudaHandles,&desc->kProj,useFP16,true),
+    vProj(cudaHandles,&desc->vProj,useFP16,true),
+    outProj(cudaHandles,&desc->outProj,useFP16,true)
+  {
+    if(!useNHWC)
+      throw StringError(name + ": CUDA transformer blocks require NHWC");
+    CudaUtils::mallocAndCopyToDevice(name,desc->ropeFreqs,ropeFreqsBuf,false);
+  }
+  ~TransformerAttentionBlock() {
+    cudaFree(ropeFreqsBuf);
+  }
+
+  size_t requiredWorkspaceBytes(CudaHandles* cudaHandles, int batchSize) const {
+    (void)cudaHandles;
+    (void)batchSize;
+    return 0;
+  }
+
+  void apply(
+    CudaHandles* cudaHandles, ScratchBuffers* scratch, int batchSize,
+    void* trunkBuf, void* trunkScratchBuf, void* maskBuf, float* maskSumBuf, void* workspaceBuf, size_t workspaceBytes
+  ) const {
+    (void)trunkScratchBuf;
+    int xySize = nnXLen * nnYLen;
+    int rows = batchSize * xySize;
+    SizedBuf<void*> normed(scratch->allocator, scratch->getBufSizeXY(numChannels));
+    SizedBuf<void*> q(scratch->allocator, scratch->getBufSizeXY(numHeads * qHeadDim));
+    SizedBuf<void*> k(scratch->allocator, scratch->getBufSizeXY(numKVHeads * qHeadDim));
+    SizedBuf<void*> v(scratch->allocator, scratch->getBufSizeXY(numKVHeads * vHeadDim));
+    SizedBuf<void*> attnOut(scratch->allocator, scratch->getBufSizeXY(numHeads * vHeadDim));
+
+    preLN.apply(scratch,batchSize,trunkBuf,normed.buf,maskBuf,maskSumBuf);
+    qProj.apply(cudaHandles,scratch,rows,normed.buf,q.buf,workspaceBuf,workspaceBytes);
+    kProj.apply(cudaHandles,scratch,rows,normed.buf,k.buf,workspaceBuf,workspaceBytes);
+    vProj.apply(cudaHandles,scratch,rows,normed.buf,v.buf,workspaceBuf,workspaceBytes);
+    if(!usingFP16) {
+      customCudaApplyRoPENHWC((float*)q.buf,(const float*)ropeFreqsBuf,batchSize,xySize,numHeads,numKVHeads,qHeadDim,nnXLen);
+      customCudaApplyRoPENHWC((float*)k.buf,(const float*)ropeFreqsBuf,batchSize,xySize,numKVHeads,numKVHeads,qHeadDim,nnXLen);
+      customCudaAttentionNHWC(
+        (const float*)q.buf,(const float*)k.buf,(const float*)v.buf,(const float*)maskBuf,(float*)attnOut.buf,
+        batchSize,xySize,numHeads,numKVHeads,qHeadDim,vHeadDim);
+    }
+    else {
+      customCudaApplyRoPENHWC((half*)q.buf,(const float*)ropeFreqsBuf,batchSize,xySize,numHeads,numKVHeads,qHeadDim,nnXLen);
+      customCudaApplyRoPENHWC((half*)k.buf,(const float*)ropeFreqsBuf,batchSize,xySize,numKVHeads,numKVHeads,qHeadDim,nnXLen);
+      customCudaAttentionNHWC(
+        (const half*)q.buf,(const half*)k.buf,(const half*)v.buf,(const half*)maskBuf,(half*)attnOut.buf,
+        batchSize,xySize,numHeads,numKVHeads,qHeadDim,vHeadDim);
+    }
+    CUDA_ERR(name.c_str(),cudaPeekAtLastError());
+    //Residual: trunk += outProj(attnOut)
+    const bool accumulate = true;
+    outProj.apply(cudaHandles,scratch,rows,attnOut.buf,trunkBuf,workspaceBuf,workspaceBytes,accumulate);
+  }
+};
+
+struct TransformerFFNBlock {
+  const string name;
+  const int numChannels;
+  const int ffnChannels;
+  const int nnXLen;
+  const int nnYLen;
+  const bool usingFP16;
+
+  const TransformerRMSNormLayer preLN;
+  const MatMulLayer linear1;
+  const MatMulLayer linearGate;
+  const MatMulLayer linear2;
+
+  TransformerFFNBlock() = delete;
+  TransformerFFNBlock(const TransformerFFNBlock&) = delete;
+  TransformerFFNBlock& operator=(const TransformerFFNBlock&) = delete;
+
+  TransformerFFNBlock(CudaHandles* cudaHandles, const TransformerFFNDesc* desc, int nnX, int nnY, bool useFP16, bool useNHWC) :
+    name(desc->name),
+    numChannels(desc->numChannels),
+    ffnChannels(desc->ffnChannels),
+    nnXLen(nnX),
+    nnYLen(nnY),
+    usingFP16(useFP16),
+    preLN(desc->preLN.name,desc->preLN.numChannels,desc->preLN.epsilon,desc->preLN.weight,vector<float>(desc->preLN.numChannels,0.0f),false,ACTIVATION_IDENTITY,nnX,nnY,useFP16),
+    linear1(cudaHandles,&desc->linear1,useFP16,true),
+    linearGate(cudaHandles,&desc->linearGate,useFP16,true),
+    linear2(cudaHandles,&desc->linear2,useFP16,true)
+  {
+    if(!useNHWC)
+      throw StringError(name + ": CUDA transformer blocks require NHWC");
+  }
+
+  size_t requiredWorkspaceBytes(CudaHandles* cudaHandles, int batchSize) const {
+    (void)cudaHandles;
+    (void)batchSize;
+    return 0;
+  }
+
+  void apply(
+    CudaHandles* cudaHandles, ScratchBuffers* scratch, int batchSize,
+    void* trunkBuf, void* trunkScratchBuf, void* maskBuf, float* maskSumBuf, void* workspaceBuf, size_t workspaceBytes
+  ) const {
+    (void)trunkScratchBuf;
+    int rows = batchSize * nnXLen * nnYLen;
+    SizedBuf<void*> normed(scratch->allocator, scratch->getBufSizeXY(numChannels));
+    SizedBuf<void*> mainProj(scratch->allocator, scratch->getBufSizeXY(ffnChannels));
+    SizedBuf<void*> gateProj(scratch->allocator, scratch->getBufSizeXY(ffnChannels));
+
+    preLN.apply(scratch,batchSize,trunkBuf,normed.buf,maskBuf,maskSumBuf);
+    linear1.apply(cudaHandles,scratch,rows,normed.buf,mainProj.buf,workspaceBuf,workspaceBytes);
+    linearGate.apply(cudaHandles,scratch,rows,normed.buf,gateProj.buf,workspaceBuf,workspaceBytes);
+    if(!usingFP16)
+      customCudaSwiGLU((float*)mainProj.buf,(const float*)gateProj.buf,rows * ffnChannels);
+    else
+      customCudaSwiGLU((half*)mainProj.buf,(const half*)gateProj.buf,rows * ffnChannels);
+    CUDA_ERR(name.c_str(),cudaPeekAtLastError());
+    //Residual: trunk += linear2(swiglu)
+    const bool accumulate = true;
+    linear2.apply(cudaHandles,scratch,rows,mainProj.buf,trunkBuf,workspaceBuf,workspaceBytes,accumulate);
+  }
+};
 
 //---------------------------------------------------------------------------------
 
@@ -1196,6 +1440,16 @@ BlockStack::BlockStack(
       );
       blocks.push_back(make_pair(NESTED_BOTTLENECK_BLOCK_KIND,std::move(blockPtr)));
     }
+    else if(descBlocks[i].first == TRANSFORMER_ATTENTION_BLOCK_KIND) {
+      TransformerAttentionDesc* blockDesc = (TransformerAttentionDesc*)descBlocks[i].second.get();
+      unique_ptr_void blockPtr = make_unique_void(new TransformerAttentionBlock(cudaHandles,blockDesc,nnXLen,nnYLen,useFP16,useNHWC));
+      blocks.push_back(make_pair(TRANSFORMER_ATTENTION_BLOCK_KIND,std::move(blockPtr)));
+    }
+    else if(descBlocks[i].first == TRANSFORMER_FFN_BLOCK_KIND) {
+      TransformerFFNDesc* blockDesc = (TransformerFFNDesc*)descBlocks[i].second.get();
+      unique_ptr_void blockPtr = make_unique_void(new TransformerFFNBlock(cudaHandles,blockDesc,nnXLen,nnYLen,useFP16,useNHWC));
+      blocks.push_back(make_pair(TRANSFORMER_FFN_BLOCK_KIND,std::move(blockPtr)));
+    }
     else {
       ASSERT_UNREACHABLE;
     }
@@ -1224,6 +1478,16 @@ size_t BlockStack::requiredWorkspaceBytes(
     }
     else if(blocks[i].first == NESTED_BOTTLENECK_BLOCK_KIND) {
       NestedBottleneckResidualBlock* block = (NestedBottleneckResidualBlock*)blocks[i].second.get();
+      b = block->requiredWorkspaceBytes(cudaHandles,batchSize);
+      bytes = std::max(bytes,b);
+    }
+    else if(blocks[i].first == TRANSFORMER_ATTENTION_BLOCK_KIND) {
+      TransformerAttentionBlock* block = (TransformerAttentionBlock*)blocks[i].second.get();
+      b = block->requiredWorkspaceBytes(cudaHandles,batchSize);
+      bytes = std::max(bytes,b);
+    }
+    else if(blocks[i].first == TRANSFORMER_FFN_BLOCK_KIND) {
+      TransformerFFNBlock* block = (TransformerFFNBlock*)blocks[i].second.get();
       b = block->requiredWorkspaceBytes(cudaHandles,batchSize);
       bytes = std::max(bytes,b);
     }
@@ -1292,6 +1556,14 @@ void BlockStack::apply(
         workspaceBytes
       );
     }
+    else if(blocks[i].first == TRANSFORMER_ATTENTION_BLOCK_KIND) {
+      TransformerAttentionBlock* block = (TransformerAttentionBlock*)blocks[i].second.get();
+      block->apply(cudaHandles,scratch,batchSize,trunkBuf,trunkScratchBuf,maskBuf,maskSumBuf,workspaceBuf,workspaceBytes);
+    }
+    else if(blocks[i].first == TRANSFORMER_FFN_BLOCK_KIND) {
+      TransformerFFNBlock* block = (TransformerFFNBlock*)blocks[i].second.get();
+      block->apply(cudaHandles,scratch,batchSize,trunkBuf,trunkScratchBuf,maskBuf,maskSumBuf,workspaceBuf,workspaceBytes);
+    }
     else {
       ASSERT_UNREACHABLE;
     }
@@ -1316,6 +1588,7 @@ struct Trunk {
   std::unique_ptr<MatMulLayer> initialMatMul;
   const BlockStack blocks;
   std::unique_ptr<BatchNormLayer> trunkTipBN;
+  std::unique_ptr<TransformerRMSNormLayer> trunkTipRMSNorm;
 
   Trunk() = delete;
   Trunk(const Trunk&) = delete;
@@ -1354,7 +1627,16 @@ struct Trunk {
     initialConv = std::make_unique<ConvLayer>(cudaHandles,manager,&desc->initialConv,useFP16,inputsUseNHWC,useNHWC);
     initialMatMul = std::make_unique<MatMulLayer>(cudaHandles,&desc->initialMatMul,useFP16);
 
-    trunkTipBN = std::make_unique<BatchNormLayer>(cudaHandles,&desc->trunkTipBN,&desc->trunkTipActivation,nnXLen,nnYLen,useFP16,useNHWC);
+    if(desc->trunkNormKind == TRUNK_NORM_KIND_RMSNORM) {
+      if(!useNHWC)
+        throw StringError(name + ": CUDA RMSNorm trunk tip requires NHWC");
+      const RMSNormLayerDesc& rmsDesc = desc->trunkTipRMSNorm;
+      trunkTipRMSNorm = std::make_unique<TransformerRMSNormLayer>(
+        rmsDesc.name,rmsDesc.numChannels,rmsDesc.epsilon,rmsDesc.gamma,rmsDesc.beta,rmsDesc.spatial,desc->trunkTipActivation.activation,nnXLen,nnYLen,useFP16
+      );
+    }
+    else
+      trunkTipBN = std::make_unique<BatchNormLayer>(cudaHandles,&desc->trunkTipBN,&desc->trunkTipActivation,nnXLen,nnYLen,useFP16,useNHWC);
     assert(desc->blocks.size() == numBlocks);
   }
 
@@ -1433,7 +1715,10 @@ struct Trunk {
     );
 
     //And now with the final BN port it from trunkScratch.buf to trunkBuf.
-    trunkTipBN->apply(cudaHandles,batchSize,trunkScratch.buf,maskBuf,trunkBuf);
+    if(trunkTipRMSNorm != nullptr)
+      trunkTipRMSNorm->apply(scratch,batchSize,trunkScratch.buf,trunkBuf,maskBuf,maskSumBuf);
+    else
+      trunkTipBN->apply(cudaHandles,batchSize,trunkScratch.buf,maskBuf,trunkBuf);
     #ifdef DEBUG_INTERMEDIATE_VALUES
     CudaUtils::debugPrint4D(string("Trunk tip"), trunkBuf, batchSize, trunkNumChannels, nnXLen, nnYLen, usingNHWC, usingFP16);
     #endif
@@ -2258,6 +2543,14 @@ ComputeHandle* NeuralNet::createComputeHandle(
       useFP16 = true;
     if(context->useNHWCMode == enabled_t::True || (context->useNHWCMode == enabled_t::Auto && useFP16))
       useNHWC = true;
+  }
+
+  //The transformer kernels assume the channels of a position are contiguous, so transformer models always
+  //run in NHWC (they have FP32 paths too, so this isn't tied to FP16).
+  if(!useNHWC && (loadedModel->modelDesc.trunk.hasAnyTransformerBlocks() || loadedModel->modelDesc.trunk.trunkNormKind == TRUNK_NORM_KIND_RMSNORM)) {
+    if(context->useNHWCMode == enabled_t::False)
+      throw StringError("CUDA backend: transformer models require NHWC, but cudaUseNHWC = false was set");
+    useNHWC = true;
   }
 
   if(logger != NULL) {

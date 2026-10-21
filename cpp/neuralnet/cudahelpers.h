@@ -56,4 +56,42 @@ void customCudaApplyCScaleBiasNHWC(const float* in, float* out, const float* sca
 void customCudaApplyCScaleBiasNHWC(const half* in, half* out, const half* scale, const half* biases, const half* mask, int n, int xy, int c, int activation);
 
 
+//Transformer kernels, NHWC only ([n, xy, c] activations), computing in fp32 whatever the storage type.
+
+//RMSNorm per position over channels: out = act(in * rms * gamma + beta) * mask. gamma/beta are float [c], mask [n, xy].
+void customCudaRMSNormNHWC(
+  const float* in, float* out, const float* gamma, const float* beta, const float* mask,
+  int nSize, int xySize, int cSize, float epsilon, int activation);
+void customCudaRMSNormNHWC(
+  const half* in, half* out, const float* gamma, const float* beta, const half* mask,
+  int nSize, int xySize, int cSize, float epsilon, int activation);
+
+//Spatial RMSNorm: one RMS per sample over all channels and on-board positions. sumSqBuf is float scratch [n].
+void customCudaSpatialRMSNormNHWC(
+  const float* in, float* out, const float* gamma, const float* beta, const float* mask, const float* maskSum,
+  int nSize, int xySize, int cSize, float epsilon, int activation, float* sumSqBuf);
+void customCudaSpatialRMSNormNHWC(
+  const half* in, half* out, const float* gamma, const float* beta, const half* mask, const float* maskSum,
+  int nSize, int xySize, int cSize, float epsilon, int activation, float* sumSqBuf);
+
+//Learnable 2D RoPE in place on [n, xy, numBufHeads*headDim], with freqs (numKVHeads, headDim/2, 2) as float.
+//Position xy is x = xy % nnXLen (column), y = xy / nnXLen (row).
+void customCudaApplyRoPENHWC(
+  float* buf, const float* freqs, int batchSize, int seqLen, int numBufHeads, int numKVHeads, int headDim, int nnXLen);
+void customCudaApplyRoPENHWC(
+  half* buf, const float* freqs, int batchSize, int seqLen, int numBufHeads, int numKVHeads, int headDim, int nnXLen);
+
+//Attention, Q [n, xy, numHeads*qHeadDim], K [n, xy, numKVHeads*qHeadDim], V [n, xy, numKVHeads*vHeadDim],
+//output [n, xy, numHeads*vHeadDim], mask [n, xy]. Off-board keys are skipped, off-board queries give 0.
+void customCudaAttentionNHWC(
+  const float* Q, const float* K, const float* V, const float* mask, float* output,
+  int batchSize, int seqLen, int numHeads, int numKVHeads, int qHeadDim, int vHeadDim);
+void customCudaAttentionNHWC(
+  const half* Q, const half* K, const half* V, const half* mask, half* output,
+  int batchSize, int seqLen, int numHeads, int numKVHeads, int qHeadDim, int vHeadDim);
+
+//SwiGLU in place: a = silu(a) * b
+void customCudaSwiGLU(float* a, const float* b, int size);
+void customCudaSwiGLU(half* a, const half* b, int size);
+
 #endif  // NEURALNET_CUDAHELPERS_H_

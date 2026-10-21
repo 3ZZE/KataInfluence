@@ -189,6 +189,9 @@ struct ModelParser {
     model->version = modelDesc->version;
     network->setName(modelDesc->name.c_str());
 
+    if(modelDesc->trunk.hasAnyTransformerBlocks() || modelDesc->trunk.trunkNormKind != TRUNK_NORM_KIND_STANDARD)
+      throw StringError("TensorRT backend does not support transformer models (or an RMSNorm trunk tip), use the CUDA backend");
+
     initInputs();
     initMaskProcLayers();
 
@@ -777,6 +780,17 @@ struct ModelParser {
       if(forceFP32) {
         softplusLayer->setPrecision(DataType::kFLOAT);
         tanhLayer->setPrecision(DataType::kFLOAT);
+        mergeLayer->setPrecision(DataType::kFLOAT);
+      }
+      return mergeLayer;
+    } else if(desc->activation == ACTIVATION_SILU) {
+      auto sigmoidLayer = model->network->addActivation(*input, ActivationType::kSIGMOID);
+      auto sigmoidLayerName = desc->name + "/sigmoid";
+      sigmoidLayer->setName(sigmoidLayerName.c_str());
+      auto mergeLayer = model->network->addElementWise(*input, *sigmoidLayer->getOutput(0), ElementWiseOperation::kPROD);
+      mergeLayer->setName(desc->name.c_str());
+      if(forceFP32) {
+        sigmoidLayer->setPrecision(DataType::kFLOAT);
         mergeLayer->setPrecision(DataType::kFLOAT);
       }
       return mergeLayer;

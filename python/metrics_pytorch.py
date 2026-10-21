@@ -687,8 +687,12 @@ class Metrics:
             scorebelief_logits,
             global_weight,
         ).sum()
-        # Influence version >= 104: the lead slots (C21 target, C29 weight) hold the moves left
+        # Influence version >= 104: the lead slots (C21 target, C29 weight) hold the moves left.
+        # Older Influence models (101..103) have no meaningful lead, so they must not train on these slots,
+        # which data from inputs version 103 on fills with move counts.
         predicts_micromoves = raw_model.config["version"] >= 104 and raw_model.config["version"] <= 199
+        if 101 <= raw_model.config["version"] <= 103:
+            target_weight_lead = torch.zeros_like(target_weight_lead)
         if predicts_micromoves:
             loss_lead = self.loss_micromoves_samplewise(
                 pred_lead,

@@ -42,6 +42,17 @@ __forceinline__ __device__ half mishh(half h) {
 }
 #endif
 
+__forceinline__ __device__ float siluf(float a) {
+  return a / (1.0f + expf(-a));
+}
+
+#ifdef CUDA_SUPPORTS_FP16
+__forceinline__ __device__ half siluh(half h) {
+  float a = __half2float(h);
+  return __float2half(a / (1.0f + expf(-a)));
+}
+#endif
+
 //--------------------------------------------------------------------------------------------------------------
 
 template <typename T>
@@ -1086,6 +1097,16 @@ void addCBiasInplaceNCKernelMish(float *buf, const float* biases, int nSize, int
   }
 }
 __global__
+void addCBiasInplaceNCKernelSilu(float *buf, const float* biases, int nSize, int cSize)
+{
+  int cIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  int nIdx = blockIdx.y * blockDim.y + threadIdx.y;
+  if(cIdx < cSize && nIdx < nSize) {
+    int idx = nIdx * cSize + cIdx;
+    buf[idx] = siluf(buf[idx] + biases[cIdx]);
+  }
+}
+__global__
 void addCBiasInplaceNCHalfKernelMish(half *buf, const half* biases, int nSize, int cSize)
 {
 #ifdef CUDA_SUPPORTS_FP16
@@ -1095,6 +1116,21 @@ void addCBiasInplaceNCHalfKernelMish(half *buf, const half* biases, int nSize, i
     int idx = nIdx * cSize + cIdx;
     half a = __hadd(buf[idx],biases[cIdx]);
     buf[idx] = mishh(a);
+  }
+#else
+  //Do nothing, FP16 not supported
+#endif
+}
+__global__
+void addCBiasInplaceNCHalfKernelSilu(half *buf, const half* biases, int nSize, int cSize)
+{
+#ifdef CUDA_SUPPORTS_FP16
+  int cIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  int nIdx = blockIdx.y * blockDim.y + threadIdx.y;
+  if(cIdx < cSize && nIdx < nSize) {
+    int idx = nIdx * cSize + cIdx;
+    half a = __hadd(buf[idx],biases[cIdx]);
+    buf[idx] = siluh(a);
   }
 #else
   //Do nothing, FP16 not supported
@@ -1131,6 +1167,12 @@ void sharedAddCBiasInplaceNC(void* buf, const void* biases, int nSize, int cSize
       addCBiasInplaceNCHalfKernelMish<<<grid,threads>>>((half*)buf,(const half*)biases,nSize,cSize);
     else
       addCBiasInplaceNCKernelMish<<<grid,threads>>>((float*)buf,(const float*)biases,nSize,cSize);
+  }
+  else if(activation == ACTIVATION_SILU) {
+    if(isHalf)
+      addCBiasInplaceNCHalfKernelSilu<<<grid,threads>>>((half*)buf,(const half*)biases,nSize,cSize);
+    else
+      addCBiasInplaceNCKernelSilu<<<grid,threads>>>((float*)buf,(const float*)biases,nSize,cSize);
   }
   else {
     throw std::runtime_error("customCudaAddCBiasInplaceNC: unsupported activation");
@@ -1298,6 +1340,17 @@ void applyCScaleBiasNCHWMishKernel(const float *in, float* out, const float* sca
   }
 }
 __global__
+void applyCScaleBiasNCHWSiluKernel(const float *in, float* out, const float* scale, const float* biases, int cSize, int sSize)
+{
+  int sIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  int cIdx = blockIdx.y * blockDim.y + threadIdx.y;
+  int nIdx = blockIdx.z;
+  if(cIdx < cSize && sIdx < sSize) {
+    int idx = (nIdx * cSize + cIdx) * sSize + sIdx;
+    out[idx] = siluf(in[idx] * scale[cIdx] + biases[cIdx]);
+  }
+}
+__global__
 void applyCScaleBiasNCHWMaskKernel(const float *in, float* out, const float* scale, const float* biases, const float* mask, int cSize, int sSize)
 {
   int sIdx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1328,6 +1381,17 @@ void applyCScaleBiasNCHWMishMaskKernel(const float *in, float* out, const float*
   if(cIdx < cSize && sIdx < sSize) {
     int idx = (nIdx * cSize + cIdx) * sSize + sIdx;
     out[idx] = mishf(in[idx] * scale[cIdx] + biases[cIdx]) * mask[nIdx*sSize+sIdx];
+  }
+}
+__global__
+void applyCScaleBiasNCHWSiluMaskKernel(const float *in, float* out, const float* scale, const float* biases, const float* mask, int cSize, int sSize)
+{
+  int sIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  int cIdx = blockIdx.y * blockDim.y + threadIdx.y;
+  int nIdx = blockIdx.z;
+  if(cIdx < cSize && sIdx < sSize) {
+    int idx = (nIdx * cSize + cIdx) * sSize + sIdx;
+    out[idx] = siluf(in[idx] * scale[cIdx] + biases[cIdx]) * mask[nIdx*sSize+sIdx];
   }
 }
 __global__
@@ -1373,6 +1437,22 @@ void applyCScaleBiasNCHWMishHalfKernel(const half *in, half* out, const half* sc
     int idx = (nIdx * cSize + cIdx) * sSize + sIdx;
     half a = __hfma(in[idx],scale[cIdx],biases[cIdx]);
     out[idx] = mishh(a);
+  }
+#else
+  //Do nothing, FP16 not supported
+#endif
+}
+__global__
+void applyCScaleBiasNCHWSiluHalfKernel(const half *in, half* out, const half* scale, const half* biases, int cSize, int sSize)
+{
+#ifdef CUDA_SUPPORTS_FP16
+  int sIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  int cIdx = blockIdx.y * blockDim.y + threadIdx.y;
+  int nIdx = blockIdx.z;
+  if(cIdx < cSize && sIdx < sSize) {
+    int idx = (nIdx * cSize + cIdx) * sSize + sIdx;
+    half a = __hfma(in[idx],scale[cIdx],biases[cIdx]);
+    out[idx] = siluh(a);
   }
 #else
   //Do nothing, FP16 not supported
@@ -1426,6 +1506,22 @@ void applyCScaleBiasNCHWMishMaskHalfKernel(const half *in, half* out, const half
   //Do nothing, FP16 not supported
 #endif
 }
+__global__
+void applyCScaleBiasNCHWSiluMaskHalfKernel(const half *in, half* out, const half* scale, const half* biases, const half* mask, int cSize, int sSize)
+{
+#ifdef CUDA_SUPPORTS_FP16
+  int sIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  int cIdx = blockIdx.y * blockDim.y + threadIdx.y;
+  int nIdx = blockIdx.z;
+  if(cIdx < cSize && sIdx < sSize) {
+    int idx = (nIdx * cSize + cIdx) * sSize + sIdx;
+    half a = __hmul(__hfma(in[idx],scale[cIdx],biases[cIdx]),mask[nIdx*sSize+sIdx]);
+    out[idx] = siluh(a);
+  }
+#else
+  //Do nothing, FP16 not supported
+#endif
+}
 
 void sharedApplyCScaleBiasNCHW(const void* in, void* out, const void* scale, const void* biases, const void* mask, int nSize, int cSize, int xySize, bool isHalf, int activation) {
   if(nSize > 65536)
@@ -1461,6 +1557,12 @@ void sharedApplyCScaleBiasNCHW(const void* in, void* out, const void* scale, con
       else
         applyCScaleBiasNCHWMishKernel<<<grid,threads>>>((const float*)in,(float*)out,(const float*)scale,(const float*)biases,cSize,sSize);
     }
+    else if(activation == ACTIVATION_SILU) {
+      if(isHalf)
+        applyCScaleBiasNCHWSiluHalfKernel<<<grid,threads>>>((const half*)in,(half*)out,(const half*)scale,(const half*)biases,cSize,sSize);
+      else
+        applyCScaleBiasNCHWSiluKernel<<<grid,threads>>>((const float*)in,(float*)out,(const float*)scale,(const float*)biases,cSize,sSize);
+    }
     else {
       throw std::runtime_error("customCudaApplyCScaleBiasNCHW: unsupported activation");
     }
@@ -1483,6 +1585,12 @@ void sharedApplyCScaleBiasNCHW(const void* in, void* out, const void* scale, con
         applyCScaleBiasNCHWMishMaskHalfKernel<<<grid,threads>>>((const half*)in,(half*)out,(const half*)scale,(const half*)biases,(const half*)mask,cSize,sSize);
       else
         applyCScaleBiasNCHWMishMaskKernel<<<grid,threads>>>((const float*)in,(float*)out,(const float*)scale,(const float*)biases,(const float*)mask,cSize,sSize);
+    }
+    else if(activation == ACTIVATION_SILU) {
+      if(isHalf)
+        applyCScaleBiasNCHWSiluMaskHalfKernel<<<grid,threads>>>((const half*)in,(half*)out,(const half*)scale,(const half*)biases,(const half*)mask,cSize,sSize);
+      else
+        applyCScaleBiasNCHWSiluMaskKernel<<<grid,threads>>>((const float*)in,(float*)out,(const float*)scale,(const float*)biases,(const float*)mask,cSize,sSize);
     }
     else {
       throw std::runtime_error("customCudaApplyCScaleBiasNCHW: unsupported activation");
@@ -1534,6 +1642,17 @@ void applyCScaleBiasNHWCMishKernel(const float* in, float* out, const float* sca
   }
 }
 __global__
+void applyCScaleBiasNHWCSiluKernel(const float* in, float* out, const float* scale, const float* biases, int sSize, int cSize)
+{
+  int cIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  int sIdx = blockIdx.y * blockDim.y + threadIdx.y;
+  int nIdx = blockIdx.z;
+  if(cIdx < cSize && sIdx < sSize) {
+    int idx = (nIdx * sSize + sIdx) * cSize + cIdx;
+    out[idx] = siluf(in[idx] * scale[cIdx] + biases[cIdx]);
+  }
+}
+__global__
 void applyCScaleBiasNHWCMaskKernel(const float* in, float* out, const float* scale, const float* biases, const float* mask, int sSize, int cSize)
 {
   int cIdx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1564,6 +1683,17 @@ void applyCScaleBiasNHWCMishMaskKernel(const float* in, float* out, const float*
   if(cIdx < cSize && sIdx < sSize) {
     int idx = (nIdx * sSize + sIdx) * cSize + cIdx;
     out[idx] = mishf(in[idx] * scale[cIdx] + biases[cIdx]) * mask[nIdx*sSize+sIdx];
+  }
+}
+__global__
+void applyCScaleBiasNHWCSiluMaskKernel(const float* in, float* out, const float* scale, const float* biases, const float* mask, int sSize, int cSize)
+{
+  int cIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  int sIdx = blockIdx.y * blockDim.y + threadIdx.y;
+  int nIdx = blockIdx.z;
+  if(cIdx < cSize && sIdx < sSize) {
+    int idx = (nIdx * sSize + sIdx) * cSize + cIdx;
+    out[idx] = siluf(in[idx] * scale[cIdx] + biases[cIdx]) * mask[nIdx*sSize+sIdx];
   }
 }
 __global__
@@ -1609,6 +1739,22 @@ void applyCScaleBiasNHWCMishHalfKernel(const half* in, half* out, const half* sc
     int idx = (nIdx * sSize + sIdx) * cSize + cIdx;
     half a = __hfma(in[idx],scale[cIdx],biases[cIdx]);
     out[idx] = mishh(a);
+  }
+#else
+  //Do nothing, FP16 not supported
+#endif
+}
+__global__
+void applyCScaleBiasNHWCSiluHalfKernel(const half* in, half* out, const half* scale, const half* biases, int sSize, int cSize)
+{
+#ifdef CUDA_SUPPORTS_FP16
+  int cIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  int sIdx = blockIdx.y * blockDim.y + threadIdx.y;
+  int nIdx = blockIdx.z;
+  if(cIdx < cSize && sIdx < sSize) {
+    int idx = (nIdx * sSize + sIdx) * cSize + cIdx;
+    half a = __hfma(in[idx],scale[cIdx],biases[cIdx]);
+    out[idx] = siluh(a);
   }
 #else
   //Do nothing, FP16 not supported
@@ -1662,6 +1808,22 @@ void applyCScaleBiasNHWCMishMaskHalfKernel(const half* in, half* out, const half
   //Do nothing, FP16 not supported
 #endif
 }
+__global__
+void applyCScaleBiasNHWCSiluMaskHalfKernel(const half* in, half* out, const half* scale, const half* biases, const half* mask, int sSize, int cSize)
+{
+#ifdef CUDA_SUPPORTS_FP16
+  int cIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  int sIdx = blockIdx.y * blockDim.y + threadIdx.y;
+  int nIdx = blockIdx.z;
+  if(cIdx < cSize && sIdx < sSize) {
+    int idx = (nIdx * sSize + sIdx) * cSize + cIdx;
+    half a = __hmul(__hfma(in[idx],scale[cIdx],biases[cIdx]),mask[nIdx*sSize+sIdx]);
+    out[idx] = siluh(a);
+  }
+#else
+  //Do nothing, FP16 not supported
+#endif
+}
 
 void sharedApplyCScaleBiasNHWC(const void* in, void* out, const void* scale, const void* biases, const void* mask, int nSize, int xySize, int cSize, bool isHalf, int activation) {
   if(nSize > 65536)
@@ -1697,6 +1859,12 @@ void sharedApplyCScaleBiasNHWC(const void* in, void* out, const void* scale, con
       else
         applyCScaleBiasNHWCMishKernel<<<grid,threads>>>((const float*)in,(float*)out,(const float*)scale,(const float*)biases,sSize,cSize);
     }
+    else if(activation == ACTIVATION_SILU) {
+      if(isHalf)
+        applyCScaleBiasNHWCSiluHalfKernel<<<grid,threads>>>((const half*)in,(half*)out,(const half*)scale,(const half*)biases,sSize,cSize);
+      else
+        applyCScaleBiasNHWCSiluKernel<<<grid,threads>>>((const float*)in,(float*)out,(const float*)scale,(const float*)biases,sSize,cSize);
+    }
     else {
       throw std::runtime_error("customCudaApplyCScaleBiasNHWC: unsupported activation");
     }
@@ -1720,6 +1888,12 @@ void sharedApplyCScaleBiasNHWC(const void* in, void* out, const void* scale, con
       else
         applyCScaleBiasNHWCMishMaskKernel<<<grid,threads>>>((const float*)in,(float*)out,(const float*)scale,(const float*)biases,(const float*)mask,sSize,cSize);
     }
+    else if(activation == ACTIVATION_SILU) {
+      if(isHalf)
+        applyCScaleBiasNHWCSiluMaskHalfKernel<<<grid,threads>>>((const half*)in,(half*)out,(const half*)scale,(const half*)biases,(const half*)mask,sSize,cSize);
+      else
+        applyCScaleBiasNHWCSiluMaskKernel<<<grid,threads>>>((const float*)in,(float*)out,(const float*)scale,(const float*)biases,(const float*)mask,sSize,cSize);
+    }
     else {
       throw std::runtime_error("customCudaApplyCScaleBiasNHWC: unsupported activation");
     }
@@ -1731,4 +1905,388 @@ void customCudaApplyCScaleBiasNHWC(const float* in, float* out, const float* sca
 }
 void customCudaApplyCScaleBiasNHWC(const half* in, half* out, const half* scale, const half* biases, const half* mask, int nSize, int xySize, int cSize, int activation) {
   sharedApplyCScaleBiasNHWC(in,out,scale,biases,mask,nSize,xySize,cSize,true,activation);
+}
+
+//--------------------------------------------------------------------------------------------------------------
+// Transformer kernels, adapted from upstream KataGo v1.17.0. NHWC only: activations are [n, xy, c], so a
+// [n, xy, heads*headDim] projection output is directly the BSHD layout of the attention kernel.
+// Everything computes in fp32, half is only the storage type.
+
+__device__ __forceinline__ float toFloatT(float x) { return x; }
+__device__ __forceinline__ float toFloatT(half x) { return __half2float(x); }
+__device__ __forceinline__ void storeFloatT(float* p, size_t idx, float v) { p[idx] = v; }
+__device__ __forceinline__ void storeFloatT(half* p, size_t idx, float v) { p[idx] = __float2half(v); }
+
+__device__ __forceinline__ float applyActivationf(float v, int activation) {
+  if(activation == ACTIVATION_RELU)
+    return fmaxf(v, 0.0f);
+  if(activation == ACTIVATION_MISH)
+    return mishf(v);
+  if(activation == ACTIVATION_SILU)
+    return siluf(v);
+  return v;
+}
+
+// RMSNorm per position over channels: out = act(in * rms * gamma + beta) * mask. One block per (n, xy).
+template<typename T>
+__global__
+void rmsNormNHWCKernel(
+  const T* in, T* out, const float* gamma, const float* beta, const T* mask,
+  int nSize, int xySize, int cSize, float epsilon, int activation
+) {
+  extern __shared__ float rmsShared[];
+  int pos = blockIdx.x;
+  int tid = threadIdx.x;
+  if(pos >= nSize * xySize)
+    return;
+  float maskVal = toFloatT(mask[pos]);
+  const T* inRow = in + (size_t)pos * cSize;
+
+  float acc = 0.0f;
+  for(int c = tid; c < cSize; c += blockDim.x) {
+    float val = toFloatT(inRow[c]);
+    acc += val * val;
+  }
+  rmsShared[tid] = acc;
+  __syncthreads();
+  for(int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if(tid < s)
+      rmsShared[tid] += rmsShared[tid + s];
+    __syncthreads();
+  }
+  float rms = rsqrtf(rmsShared[0] / (float)cSize + epsilon);
+
+  T* outRow = out + (size_t)pos * cSize;
+  for(int c = tid; c < cSize; c += blockDim.x) {
+    float val = applyActivationf(toFloatT(inRow[c]) * rms * gamma[c] + beta[c], activation);
+    storeFloatT(outRow, c, val * maskVal);
+  }
+}
+
+template<typename T>
+static void launchRMSNormNHWC(
+  const T* in, T* out, const float* gamma, const float* beta, const T* mask,
+  int nSize, int xySize, int cSize, float epsilon, int activation
+) {
+  int totalPositions = nSize * xySize;
+  if(totalPositions <= 0)
+    return;
+  int threads = 32;
+  while(threads < cSize && threads < targetNumThreads)
+    threads *= 2;
+  rmsNormNHWCKernel<T><<<totalPositions, threads, threads * sizeof(float)>>>(in, out, gamma, beta, mask, nSize, xySize, cSize, epsilon, activation);
+}
+void customCudaRMSNormNHWC(
+  const float* in, float* out, const float* gamma, const float* beta, const float* mask,
+  int nSize, int xySize, int cSize, float epsilon, int activation
+) {
+  launchRMSNormNHWC<float>(in, out, gamma, beta, mask, nSize, xySize, cSize, epsilon, activation);
+}
+void customCudaRMSNormNHWC(
+  const half* in, half* out, const float* gamma, const float* beta, const half* mask,
+  int nSize, int xySize, int cSize, float epsilon, int activation
+) {
+  launchRMSNormNHWC<half>(in, out, gamma, beta, mask, nSize, xySize, cSize, epsilon, activation);
+}
+
+// Spatial RMSNorm: one RMS per sample over all channels and on-board positions.
+// Pass 1: one block per sample writes the masked sum of squares. Pass 2: one block per (n, xy) applies it.
+template<typename T>
+__global__
+void spatialRMSNormSumSqNHWCKernel(const T* in, const T* mask, float* sumSqOut, int xySize, int cSize) {
+  extern __shared__ float sumShared[];
+  int n = blockIdx.x;
+  int tid = threadIdx.x;
+  int total = xySize * cSize;
+  const T* inN = in + (size_t)n * total;
+  float acc = 0.0f;
+  for(int i = tid; i < total; i += blockDim.x) {
+    float val = toFloatT(inN[i]) * toFloatT(mask[n * xySize + i / cSize]);
+    acc += val * val;
+  }
+  sumShared[tid] = acc;
+  __syncthreads();
+  for(int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if(tid < s)
+      sumShared[tid] += sumShared[tid + s];
+    __syncthreads();
+  }
+  if(tid == 0)
+    sumSqOut[n] = sumShared[0];
+}
+
+template<typename T>
+__global__
+void spatialRMSNormApplyNHWCKernel(
+  const T* in, T* out, const float* gamma, const float* beta, const T* mask, const float* maskSum, const float* sumSq,
+  int xySize, int cSize, float epsilon, int activation
+) {
+  int pos = blockIdx.x;
+  int n = pos / xySize;
+  float maskVal = toFloatT(mask[pos]);
+  float rms = rsqrtf(sumSq[n] / fmaxf(1.0f, maskSum[n] * (float)cSize) + epsilon);
+  for(int c = threadIdx.x; c < cSize; c += blockDim.x) {
+    size_t idx = (size_t)pos * cSize + c;
+    float val = applyActivationf(toFloatT(in[idx]) * rms * gamma[c] + beta[c], activation);
+    storeFloatT(out, idx, val * maskVal);
+  }
+}
+
+template<typename T>
+static void launchSpatialRMSNormNHWC(
+  const T* in, T* out, const float* gamma, const float* beta, const T* mask, const float* maskSum,
+  int nSize, int xySize, int cSize, float epsilon, int activation, float* sumSqBuf
+) {
+  if(nSize <= 0)
+    return;
+  int threads = targetNumThreads;
+  spatialRMSNormSumSqNHWCKernel<T><<<nSize, threads, threads * sizeof(float)>>>(in, mask, sumSqBuf, xySize, cSize);
+  int applyThreads = 32;
+  while(applyThreads < cSize && applyThreads < targetNumThreads)
+    applyThreads *= 2;
+  spatialRMSNormApplyNHWCKernel<T><<<nSize * xySize, applyThreads>>>(in, out, gamma, beta, mask, maskSum, sumSqBuf, xySize, cSize, epsilon, activation);
+}
+void customCudaSpatialRMSNormNHWC(
+  const float* in, float* out, const float* gamma, const float* beta, const float* mask, const float* maskSum,
+  int nSize, int xySize, int cSize, float epsilon, int activation, float* sumSqBuf
+) {
+  launchSpatialRMSNormNHWC<float>(in, out, gamma, beta, mask, maskSum, nSize, xySize, cSize, epsilon, activation, sumSqBuf);
+}
+void customCudaSpatialRMSNormNHWC(
+  const half* in, half* out, const float* gamma, const float* beta, const half* mask, const float* maskSum,
+  int nSize, int xySize, int cSize, float epsilon, int activation, float* sumSqBuf
+) {
+  launchSpatialRMSNormNHWC<half>(in, out, gamma, beta, mask, maskSum, nSize, xySize, cSize, epsilon, activation, sumSqBuf);
+}
+
+// Learnable 2D RoPE in place on a BSHD buffer [n, xy, numBufHeads*headDim], recomputing the angles
+// x*freqX + y*freqY from freqs (numKVHeads, numPairs, 2). Buffer head h uses kv head h*numKVHeads/numBufHeads.
+// One block per (xy, n), one thread per (head, pair).
+template<typename T>
+__global__
+void applyRoPENHWCKernel(
+  T* buf, const float* freqs, int seqLen, int numBufHeads, int numKVHeads, int headDim, int numPairs, int nnXLen
+) {
+  int xy = blockIdx.x;
+  int n = blockIdx.y;
+  int hp = threadIdx.x;
+  if(xy >= seqLen || hp >= numBufHeads * numPairs)
+    return;
+  int h = hp / numPairs;
+  int pairIdx = hp % numPairs;
+  int totalDim = numBufHeads * headDim;
+  size_t idx0 = (size_t)(n * seqLen + xy) * totalDim + h * headDim + 2 * pairIdx;
+  size_t idx1 = idx0 + 1;
+
+  int kvh = h * numKVHeads / numBufHeads;
+  int x = xy % nnXLen;
+  int y = xy / nnXLen;
+  float freqX = freqs[(kvh * numPairs + pairIdx) * 2 + 0];
+  float freqY = freqs[(kvh * numPairs + pairIdx) * 2 + 1];
+  float angle = (float)x * freqX + (float)y * freqY;
+  float sinVal, cosVal;
+  sincosf(angle, &sinVal, &cosVal);
+
+  float x0 = toFloatT(buf[idx0]);
+  float x1 = toFloatT(buf[idx1]);
+  storeFloatT(buf, idx0, x0 * cosVal - x1 * sinVal);
+  storeFloatT(buf, idx1, x0 * sinVal + x1 * cosVal);
+}
+
+template<typename T>
+static void launchRoPENHWC(
+  T* buf, const float* freqs, int batchSize, int seqLen, int numBufHeads, int numKVHeads, int headDim, int nnXLen
+) {
+  int numPairs = headDim / 2;
+  int totalHP = numBufHeads * numPairs;
+  if(totalHP > 1024)
+    throw std::runtime_error("customCudaApplyRoPENHWC: numHeads*headDim/2 exceeds 1024 threads per block");
+  if(batchSize > 65535)
+    throw std::runtime_error("customCudaApplyRoPENHWC: batchSize too large");
+  int threads = ((totalHP + 31) / 32) * 32;
+  dim3 blocks(seqLen, batchSize, 1);
+  applyRoPENHWCKernel<T><<<blocks, threads>>>(buf, freqs, seqLen, numBufHeads, numKVHeads, headDim, numPairs, nnXLen);
+}
+void customCudaApplyRoPENHWC(
+  float* buf, const float* freqs, int batchSize, int seqLen, int numBufHeads, int numKVHeads, int headDim, int nnXLen
+) {
+  launchRoPENHWC<float>(buf, freqs, batchSize, seqLen, numBufHeads, numKVHeads, headDim, nnXLen);
+}
+void customCudaApplyRoPENHWC(
+  half* buf, const float* freqs, int batchSize, int seqLen, int numBufHeads, int numKVHeads, int headDim, int nnXLen
+) {
+  launchRoPENHWC<half>(buf, freqs, batchSize, seqLen, numBufHeads, numKVHeads, headDim, nnXLen);
+}
+
+// Scaled dot product attention with online softmax, tiled over keys (upstream flashAttentionTiledImpl).
+// Grid: (numQGroups, batchSize * numHeads), block: BLOCK_Q threads, each thread owns Q_PER_THREAD queries.
+// Off-board keys are skipped and off-board queries give 0.
+template<int qHeadDim, int vHeadDim, int BLOCK_Q, int BLOCK_KV, int Q_PER_THREAD, typename T>
+__global__
+void flashAttentionNHWCKernel(
+  const T* Q, const T* K, const T* V, const T* mask, T* output,
+  int seqLen, int numHeads, int numKVHeads, float scale
+) {
+  const int tid = threadIdx.x;
+  const int qBlockStart = blockIdx.x * (BLOCK_Q * Q_PER_THREAD);
+  const int bh = blockIdx.y;
+  const int n = bh / numHeads;
+  const int h = bh % numHeads;
+  const int kvh = h * numKVHeads / numHeads;
+
+  const int qTotalDim = numHeads * qHeadDim;
+  const int kTotalDim = numKVHeads * qHeadDim;
+  const int vTotalDim = numKVHeads * vHeadDim;
+  const int oTotalDim = numHeads * vHeadDim;
+
+  __shared__ float kTile[BLOCK_KV * qHeadDim];
+  __shared__ float vTile[BLOCK_KV * vHeadDim];
+  __shared__ float kMaskTile[BLOCK_KV];
+
+  float qReg[Q_PER_THREAD * qHeadDim];
+  float qMask[Q_PER_THREAD];
+  float runningMax[Q_PER_THREAD];
+  float runningSum[Q_PER_THREAD];
+  float acc[Q_PER_THREAD * vHeadDim];
+
+  #pragma unroll
+  for(int qi = 0; qi < Q_PER_THREAD; qi++) {
+    int qPos = qBlockStart + qi * BLOCK_Q + tid;
+    qMask[qi] = 0.0f;
+    if(qPos < seqLen) {
+      qMask[qi] = toFloatT(mask[n * seqLen + qPos]);
+      if(qMask[qi] != 0.0f) {
+        const T* qPtr = Q + ((size_t)n * seqLen + qPos) * qTotalDim + h * qHeadDim;
+        #pragma unroll
+        for(int d = 0; d < qHeadDim; d++)
+          qReg[qi * qHeadDim + d] = toFloatT(qPtr[d]) * scale;
+      }
+    }
+    runningMax[qi] = -1e30f;
+    runningSum[qi] = 0.0f;
+    #pragma unroll
+    for(int d = 0; d < vHeadDim; d++)
+      acc[qi * vHeadDim + d] = 0.0f;
+  }
+
+  for(int kvStart = 0; kvStart < seqLen; kvStart += BLOCK_KV) {
+    for(int t = tid; t < BLOCK_KV * qHeadDim; t += BLOCK_Q) {
+      int tileKPos = t / qHeadDim;
+      int tileD = t % qHeadDim;
+      int globalKPos = kvStart + tileKPos;
+      float v = 0.0f;
+      if(globalKPos < seqLen)
+        v = toFloatT(K[((size_t)n * seqLen + globalKPos) * kTotalDim + kvh * qHeadDim + tileD]);
+      kTile[tileKPos * qHeadDim + tileD] = v;
+    }
+    for(int t = tid; t < BLOCK_KV * vHeadDim; t += BLOCK_Q) {
+      int tileKPos = t / vHeadDim;
+      int tileD = t % vHeadDim;
+      int globalKPos = kvStart + tileKPos;
+      float v = 0.0f;
+      if(globalKPos < seqLen)
+        v = toFloatT(V[((size_t)n * seqLen + globalKPos) * vTotalDim + kvh * vHeadDim + tileD]);
+      vTile[tileKPos * vHeadDim + tileD] = v;
+    }
+    for(int t = tid; t < BLOCK_KV; t += BLOCK_Q) {
+      int globalKPos = kvStart + t;
+      kMaskTile[t] = globalKPos < seqLen ? toFloatT(mask[n * seqLen + globalKPos]) : 0.0f;
+    }
+    __syncthreads();
+
+    int kvEnd = min(BLOCK_KV, seqLen - kvStart);
+    #pragma unroll
+    for(int qi = 0; qi < Q_PER_THREAD; qi++) {
+      int qPos = qBlockStart + qi * BLOCK_Q + tid;
+      if(qPos >= seqLen || qMask[qi] == 0.0f)
+        continue;
+      for(int tk = 0; tk < kvEnd; tk++) {
+        if(kMaskTile[tk] == 0.0f)
+          continue;
+        float dot = 0.0f;
+        #pragma unroll
+        for(int d = 0; d < qHeadDim; d++)
+          dot += qReg[qi * qHeadDim + d] * kTile[tk * qHeadDim + d];
+        float newMax = fmaxf(runningMax[qi], dot);
+        float expOldMax = __expf(runningMax[qi] - newMax);
+        float expCur = __expf(dot - newMax);
+        #pragma unroll
+        for(int d = 0; d < vHeadDim; d++)
+          acc[qi * vHeadDim + d] = acc[qi * vHeadDim + d] * expOldMax + expCur * vTile[tk * vHeadDim + d];
+        runningSum[qi] = runningSum[qi] * expOldMax + expCur;
+        runningMax[qi] = newMax;
+      }
+    }
+    __syncthreads();
+  }
+
+  #pragma unroll
+  for(int qi = 0; qi < Q_PER_THREAD; qi++) {
+    int qPos = qBlockStart + qi * BLOCK_Q + tid;
+    if(qPos >= seqLen)
+      continue;
+    T* outPtr = output + ((size_t)n * seqLen + qPos) * oTotalDim + h * vHeadDim;
+    float invSum = (qMask[qi] != 0.0f && runningSum[qi] > 0.0f) ? (1.0f / runningSum[qi]) : 0.0f;
+    #pragma unroll
+    for(int d = 0; d < vHeadDim; d++)
+      storeFloatT(outPtr, d, acc[qi * vHeadDim + d] * invSum);
+  }
+}
+
+template<typename T>
+static void launchFlashAttentionNHWC(
+  const T* Q, const T* K, const T* V, const T* mask, T* output,
+  int batchSize, int seqLen, int numHeads, int numKVHeads, int qHeadDim, int vHeadDim
+) {
+  if(batchSize * numHeads > 65535)
+    throw std::runtime_error("customCudaAttentionNHWC: batchSize * numHeads too large");
+  float scale = 1.0f / sqrtf((float)qHeadDim);
+  constexpr int BQ = 128;
+  constexpr int BKV = 32;
+  dim3 grid((seqLen + BQ - 1) / BQ, batchSize * numHeads);
+#define KATAGO_LAUNCH_ATTN(QD, VD) \
+  flashAttentionNHWCKernel<(QD), (VD), BQ, BKV, 1, T><<<grid, BQ>>>(Q, K, V, mask, output, seqLen, numHeads, numKVHeads, scale)
+  //Larger head dims would need the per-thread query and accumulator arrays restructured to avoid register spills
+  if(qHeadDim == 32 && vHeadDim == 32) KATAGO_LAUNCH_ATTN(32, 32);
+  else if(qHeadDim == 16 && vHeadDim == 16) KATAGO_LAUNCH_ATTN(16, 16);
+  else if(qHeadDim == 64 && vHeadDim == 64) KATAGO_LAUNCH_ATTN(64, 64);
+  else if(qHeadDim == 32 && vHeadDim == 16) KATAGO_LAUNCH_ATTN(32, 16);
+  else if(qHeadDim == 32 && vHeadDim == 64) KATAGO_LAUNCH_ATTN(32, 64);
+  else if(qHeadDim == 64 && vHeadDim == 32) KATAGO_LAUNCH_ATTN(64, 32);
+  else
+    throw std::runtime_error("customCudaAttentionNHWC: unsupported (qHeadDim, vHeadDim) = (" + std::to_string(qHeadDim) + ", " + std::to_string(vHeadDim) + ")");
+#undef KATAGO_LAUNCH_ATTN
+}
+void customCudaAttentionNHWC(
+  const float* Q, const float* K, const float* V, const float* mask, float* output,
+  int batchSize, int seqLen, int numHeads, int numKVHeads, int qHeadDim, int vHeadDim
+) {
+  launchFlashAttentionNHWC<float>(Q, K, V, mask, output, batchSize, seqLen, numHeads, numKVHeads, qHeadDim, vHeadDim);
+}
+void customCudaAttentionNHWC(
+  const half* Q, const half* K, const half* V, const half* mask, half* output,
+  int batchSize, int seqLen, int numHeads, int numKVHeads, int qHeadDim, int vHeadDim
+) {
+  launchFlashAttentionNHWC<half>(Q, K, V, mask, output, batchSize, seqLen, numHeads, numKVHeads, qHeadDim, vHeadDim);
+}
+
+// SwiGLU in place: a = silu(a) * b
+template<typename T>
+__global__
+void swiGLUKernel(T* a, const T* b, int size) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if(idx < size)
+    storeFloatT(a, idx, siluf(toFloatT(a[idx])) * toFloatT(b[idx]));
+}
+void customCudaSwiGLU(float* a, const float* b, int size) {
+  if(size <= 0)
+    return;
+  int threads = targetNumThreads;
+  swiGLUKernel<float><<<(size + threads - 1) / threads, threads>>>(a, b, size);
+}
+void customCudaSwiGLU(half* a, const half* b, int size) {
+  if(size <= 0)
+    return;
+  int threads = targetNumThreads;
+  swiGLUKernel<half><<<(size + threads - 1) / threads, threads>>>(a, b, size);
 }
