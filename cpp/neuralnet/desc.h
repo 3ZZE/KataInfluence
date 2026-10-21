@@ -171,9 +171,107 @@ struct NestedBottleneckResidualBlockDesc {
   void iterConvLayers(std::function<void(const ConvLayerDesc& dest)> f) const;
 };
 
+// Transformer support, ported from upstream KataGo (model files from python/export_model_pytorch.py).
+
+// Trunk final normalization kind (stored in the trunk header from model version 104)
+constexpr int TRUNK_NORM_KIND_STANDARD = 0; // BatchNorm or BiasMask
+constexpr int TRUNK_NORM_KIND_RMSNORM = 1;  // RMSNorm (spatial or not, see RMSNormLayerDesc::spatial)
+
+// RMSNorm at the end of the trunk, with gamma and beta, masked to the board
+struct RMSNormLayerDesc {
+  std::string name;
+  int numChannels;
+  float epsilon;
+  // If true, one RMS per sample over all channels and on-board positions, else one per position over channels
+  bool spatial;
+  std::vector<float> gamma;
+  std::vector<float> beta;
+
+  RMSNormLayerDesc();
+  RMSNormLayerDesc(std::istream& in, bool binaryFloats);
+  RMSNormLayerDesc(RMSNormLayerDesc&& other);
+
+  RMSNormLayerDesc(const RMSNormLayerDesc&) = delete;
+  RMSNormLayerDesc& operator=(const RMSNormLayerDesc&) = delete;
+
+  RMSNormLayerDesc& operator=(RMSNormLayerDesc&& other);
+};
+
+// RMSNorm inside transformer blocks: per position over channels, weight only
+struct TransformerRMSNormDesc {
+  std::string name;
+  int numChannels;
+  float epsilon;
+  std::vector<float> weight;
+
+  TransformerRMSNormDesc();
+  TransformerRMSNormDesc(std::istream& in, bool binaryFloats);
+  TransformerRMSNormDesc(TransformerRMSNormDesc&& other);
+
+  TransformerRMSNormDesc(const TransformerRMSNormDesc&) = delete;
+  TransformerRMSNormDesc& operator=(const TransformerRMSNormDesc&) = delete;
+
+  TransformerRMSNormDesc& operator=(TransformerRMSNormDesc&& other);
+};
+
+// Pre-norm self-attention over the board positions with learnable 2D RoPE. Returns a residual.
+// Query head h uses kv head h / (numHeads / numKVHeads). Attention ignores off-board keys.
+struct TransformerAttentionDesc {
+  std::string name;
+  int numHeads;
+  int numKVHeads;
+  int qHeadDim;
+  int vHeadDim;
+
+  TransformerRMSNormDesc preLN;
+  MatMulLayerDesc qProj;
+  MatMulLayerDesc kProj;
+  MatMulLayerDesc vProj;
+  MatMulLayerDesc outProj;
+
+  // Learnable RoPE frequencies (numKVHeads, qHeadDim/2, 2) flattened, (omega_x, omega_y) with x = column, y = row
+  std::vector<float> ropeFreqs;
+
+  TransformerAttentionDesc();
+  TransformerAttentionDesc(std::istream& in, bool binaryFloats);
+  TransformerAttentionDesc(TransformerAttentionDesc&& other);
+
+  TransformerAttentionDesc(const TransformerAttentionDesc&) = delete;
+  TransformerAttentionDesc& operator=(const TransformerAttentionDesc&) = delete;
+
+  TransformerAttentionDesc& operator=(TransformerAttentionDesc&& other);
+
+  // RoPE rotation tables, indexed ((kvHead * numPairs + pair) * paddedNNXYLen + y * nnXLen + x).
+  // Positions from nnXLen*nnYLen up to paddedNNXYLen are filled with 0.
+  void computeRopeCosSin(int nnXLen, int nnYLen, int paddedNNXYLen, std::vector<float>& cosTable, std::vector<float>& sinTable) const;
+};
+
+// Pre-norm SwiGLU feed-forward: linear2(silu(linear1(x)) * linearGate(x)). Returns a residual.
+struct TransformerFFNDesc {
+  std::string name;
+  int numChannels;
+  int ffnChannels;
+
+  TransformerRMSNormDesc preLN;
+  MatMulLayerDesc linear1;
+  MatMulLayerDesc linearGate;
+  MatMulLayerDesc linear2;
+
+  TransformerFFNDesc();
+  TransformerFFNDesc(std::istream& in, bool binaryFloats);
+  TransformerFFNDesc(TransformerFFNDesc&& other);
+
+  TransformerFFNDesc(const TransformerFFNDesc&) = delete;
+  TransformerFFNDesc& operator=(const TransformerFFNDesc&) = delete;
+
+  TransformerFFNDesc& operator=(TransformerFFNDesc&& other);
+};
+
 constexpr int ORDINARY_BLOCK_KIND = 0;
 constexpr int GLOBAL_POOLING_BLOCK_KIND = 2;
 constexpr int NESTED_BOTTLENECK_BLOCK_KIND = 3;
+constexpr int TRANSFORMER_ATTENTION_BLOCK_KIND = 4;
+constexpr int TRANSFORMER_FFN_BLOCK_KIND = 5;
 
 struct TrunkDesc {
   std::string name;
@@ -186,7 +284,9 @@ struct TrunkDesc {
   ConvLayerDesc initialConv;
   MatMulLayerDesc initialMatMul;
   std::vector<std::pair<int, unique_ptr_void>> blocks;
-  BatchNormLayerDesc trunkTipBN;
+  int trunkNormKind;  // TRUNK_NORM_KIND_*
+  BatchNormLayerDesc trunkTipBN;  // when trunkNormKind == TRUNK_NORM_KIND_STANDARD
+  RMSNormLayerDesc trunkTipRMSNorm;  // when trunkNormKind == TRUNK_NORM_KIND_RMSNORM
   ActivationLayerDesc trunkTipActivation;
 
   TrunkDesc();
@@ -200,6 +300,8 @@ struct TrunkDesc {
   TrunkDesc& operator=(TrunkDesc&& other);
 
   void iterConvLayers(std::function<void(const ConvLayerDesc& dest)> f) const;
+  //True if any block, including ones nested inside nested bottleneck blocks, is a transformer block
+  bool hasAnyTransformerBlocks() const;
 };
 
 struct PolicyHeadDesc {

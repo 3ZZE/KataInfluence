@@ -247,6 +247,9 @@ std::set<int> NNEvaluator::getGpuIdxs() const {
   return gpuIdxs;
 }
 
+int NNEvaluator::getModelVersion() const {
+  return modelVersion;
+}
 int NNEvaluator::getNNXLen() const {
   return nnXLen;
 }
