@@ -82,7 +82,11 @@ Backends:
 - CUDA: forced to NHWC. Projections are cuBLAS GEMMs with fp32 accumulation, and the attention kernel is tiled with an online softmax. Supported head dims are 16, 32 and 64.
 - TensorRT: refuses transformer models.
 
+Masking: walls inside the box are off-board (spatial plane 0 is 0), so every backend applies the board mask even when the box fills the NN buffer exactly.
+Upstream CUDA and TensorRT skip the mask in that case (`requireExactNNLen`, used by selfplay when all games have one size), which is only valid without walls.
+
 `katago dumpnnparity` writes NN inputs and outputs on random positions, evaluated in batches.
+`-exact-nn-len` uses only full-size boards with `requireExactNNLen`, the selfplay path; test both modes.
 `python/test_nn_parity.py` compares them with the python checkpoint, or two backends with each other. Use it after any backend change.
 
 ## Text board format

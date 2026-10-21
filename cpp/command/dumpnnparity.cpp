@@ -24,6 +24,7 @@ int MainCmds::dumpnnparity(const vector<string>& args) {
   int nnLen;
   string seed;
   int numThreads;
+  bool exactNNLen;
   try {
     KataGoCommandLine cmd("Dump neural net inputs and outputs on random positions, to check backends against each other and against python.");
     cmd.addConfigFileArg(KataGoCommandLine::defaultGtpConfigFileName(),"gtp_example.cfg");
@@ -33,7 +34,9 @@ int MainCmds::dumpnnparity(const vector<string>& args) {
     TCLAP::ValueArg<int> nnLenArg("","nn-len","Neural net board length, default 11",false,11,"LEN");
     TCLAP::ValueArg<string> seedArg("","seed","Random seed for the positions",false,"dumpnnparity","SEED");
     TCLAP::ValueArg<int> numThreadsArg("","num-threads","Threads evaluating concurrently, so that the backend sees batches, default 8",false,8,"N");
+    TCLAP::SwitchArg exactNNLenArg("","exact-nn-len","Only full-size boards, evaluated with requireExactNNLen as selfplay does when all games use one size");
     cmd.add(outArg);
+    cmd.add(exactNNLenArg);
     cmd.add(numThreadsArg);
     cmd.add(numPositionsArg);
     cmd.add(nnLenArg);
@@ -48,6 +51,7 @@ int MainCmds::dumpnnparity(const vector<string>& args) {
     nnLen = nnLenArg.getValue();
     seed = seedArg.getValue();
     numThreads = numThreadsArg.getValue();
+    exactNNLen = exactNNLenArg.getValue();
     cmd.getConfig(cfg);
     if(numThreads < 1 || numThreads > 256)
       throw StringError("num-threads must be in 1..256");
@@ -66,7 +70,7 @@ int MainCmds::dumpnnparity(const vector<string>& args) {
   const int maxConcurrentEvals = numThreads * 2 + 16;
   const int expectedConcurrentEvals = numThreads;
   const int defaultMaxBatchSize = numThreads;
-  const bool defaultRequireExactNNLen = false;
+  const bool defaultRequireExactNNLen = exactNNLen;
   const bool disableFP16 = false;
   NNEvaluator* nnEval = Setup::initializeNNEvaluator(
     modelFile,modelFile,"",cfg,logger,seedRand,maxConcurrentEvals,expectedConcurrentEvals,
@@ -97,6 +101,8 @@ int MainCmds::dumpnnparity(const vector<string>& args) {
   Rand rand(seed);
   while((int)boards.size() < numPositions) {
     int size = rand.nextBool(0.25) ? 5 + (int)rand.nextUInt(nnLen - 4) : nnLen;
+    if(exactNNLen)
+      size = nnLen;
     Board board = RandomOpening::initStartPosition(size, size, rand, 0.5, 0.5, 0.3);
     Rules rules(rand.nextBool(0.5) ? 0 : 20 + (int)rand.nextUInt(200));
     rules.forbidPassUnlessNoOtherMove = rand.nextBool(0.3);
