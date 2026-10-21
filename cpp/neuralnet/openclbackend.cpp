@@ -153,14 +153,17 @@ struct CompiledPrograms {
   CLProgram winogradConv3x3NCHWTransformProgram;
   CLProgram winogradConv3x3NCHWBNReluTransformProgram;
   CLProgram winogradConv3x3NCHWBNMishTransformProgram;
+  CLProgram winogradConv3x3NCHWBNSiluTransformProgram;
   CLProgram winogradConv3x3NCHWUntransformProgram;
   CLProgram winogradConv5x5NCHWTransformProgram;
   CLProgram winogradConv5x5NCHWBNReluTransformProgram;
   CLProgram winogradConv5x5NCHWBNMishTransformProgram;
+  CLProgram winogradConv5x5NCHWBNSiluTransformProgram;
   CLProgram winogradConv5x5NCHWUntransformProgram;
   CLProgram scaleBiasMaskNCHWProgram;
   CLProgram scaleBiasMaskReluNCHWProgram;
   CLProgram scaleBiasMaskMishNCHWProgram;
+  CLProgram scaleBiasMaskSiluNCHWProgram;
   CLProgram addPointWiseProgram;
   CLProgram sumChannelsNCHWProgram;
   CLProgram gPoolChannelsNCHWMaskProgram;
@@ -169,11 +172,22 @@ struct CompiledPrograms {
   CLProgram addCBiasesNCProgram;
   CLProgram addCBiasesNCReluProgram;
   CLProgram addCBiasesNCMishProgram;
+  CLProgram addCBiasesNCSiluProgram;
   CLProgram extractChannel0NCHWProgram;
   CLProgram xgemmDirectProgram;
   CLProgram xgemmDirectProgramAlwaysFP32;
   CLProgram xgemmProgram;
   CLProgram hgemmWmmaNCHWProgram;
+  CLProgram transformerRMSNormProgram;
+  CLProgram transformerSpatialRMSNormProgram;
+  CLProgram transformerApplyRoPEProgram;
+  CLProgram transformerSwiGLUProgram;
+
+  //Attention programs depend on the head dims of the model, compiled on first use
+  const cl_context context;
+  const vector<cl_device_id> deviceIds;
+  std::mutex attentionProgramsMutex;
+  map<pair<int,int>,cl_program> attentionProgramsByHeadDims;
 
   CompiledPrograms(
     const cl_context& context,
@@ -188,7 +202,9 @@ struct CompiledPrograms {
     usingFP16Storage(useFP16Storage),
     usingFP16Compute(useFP16Compute),
     usingFP16TensorCores(useFP16TensorCores),
-    usingFP16TensorCoresFor1x1(useFP16TensorCoresFor1x1)
+    usingFP16TensorCoresFor1x1(useFP16TensorCoresFor1x1),
+    context(context),
+    deviceIds(deviceIdsToUse)
   {
     string maybeFP16CompileOptions = "";
     if(useFP16Storage)
@@ -212,6 +228,10 @@ struct CompiledPrograms {
       "winogradConv3x3NCHWBNMishTransformProgram", context, deviceIdsToUse, OpenCLKernels::winogradBNActTransformNCHW,
       tuneParams.conv3x3.compileOptions() + maybeFP16CompileOptions + OpenCLKernels::actMishDefine
     );
+    winogradConv3x3NCHWBNSiluTransformProgram = compileProgram(
+      "winogradConv3x3NCHWBNSiluTransformProgram", context, deviceIdsToUse, OpenCLKernels::winogradBNActTransformNCHW,
+      tuneParams.conv3x3.compileOptions() + maybeFP16CompileOptions + OpenCLKernels::actSiluDefine
+    );
     winogradConv3x3NCHWUntransformProgram = compileProgram(
       "winogradConv3x3NCHWUntransformProgram", context, deviceIdsToUse, OpenCLKernels::winogradUntransformNCHW,
       tuneParams.conv3x3.compileOptions() + maybeFP16CompileOptions
@@ -227,6 +247,10 @@ struct CompiledPrograms {
     winogradConv5x5NCHWBNMishTransformProgram = compileProgram(
       "winogradConv5x5NCHWBNMishTransformProgram", context, deviceIdsToUse, OpenCLKernels::winogradBNActTransformNCHW,
       tuneParams.conv5x5.compileOptions() + maybeFP16CompileOptions + OpenCLKernels::actMishDefine
+    );
+    winogradConv5x5NCHWBNSiluTransformProgram = compileProgram(
+      "winogradConv5x5NCHWBNSiluTransformProgram", context, deviceIdsToUse, OpenCLKernels::winogradBNActTransformNCHW,
+      tuneParams.conv5x5.compileOptions() + maybeFP16CompileOptions + OpenCLKernels::actSiluDefine
     );
     winogradConv5x5NCHWUntransformProgram = compileProgram(
       "winogradConv5x5NCHWUntransformProgram", context, deviceIdsToUse, OpenCLKernels::winogradUntransformNCHW,
@@ -244,6 +268,10 @@ struct CompiledPrograms {
     scaleBiasMaskMishNCHWProgram = compileProgram(
       "scaleBiasMaskMishNCHWProgram", context, deviceIdsToUse, OpenCLKernels::scaleBiasMaskActNCHW,
       maybeFP16CompileOptions + OpenCLKernels::actMishDefine
+    );
+    scaleBiasMaskSiluNCHWProgram = compileProgram(
+      "scaleBiasMaskSiluNCHWProgram", context, deviceIdsToUse, OpenCLKernels::scaleBiasMaskActNCHW,
+      maybeFP16CompileOptions + OpenCLKernels::actSiluDefine
     );
     addPointWiseProgram = compileProgram(
       "addPointWiseProgram", context, deviceIdsToUse, OpenCLKernels::addPointWise,
@@ -276,6 +304,26 @@ struct CompiledPrograms {
     addCBiasesNCMishProgram = compileProgram(
       "addCBiasesNCMishProgram", context, deviceIdsToUse, OpenCLKernels::addCBiasesNCAct,
       maybeFP16CompileOptions + OpenCLKernels::actMishDefine
+    );
+    addCBiasesNCSiluProgram = compileProgram(
+      "addCBiasesNCSiluProgram", context, deviceIdsToUse, OpenCLKernels::addCBiasesNCAct,
+      maybeFP16CompileOptions + OpenCLKernels::actSiluDefine
+    );
+    transformerRMSNormProgram = compileProgram(
+      "transformerRMSNormProgram", context, deviceIdsToUse, OpenCLKernels::transformerRMSNorm,
+      maybeFP16CompileOptions + " -DWG_XY_SIZE=8 -DWG_C_SIZE=32"
+    );
+    transformerSpatialRMSNormProgram = compileProgram(
+      "transformerSpatialRMSNormProgram", context, deviceIdsToUse, OpenCLKernels::transformerSpatialRMSNorm,
+      maybeFP16CompileOptions + " -DTILE_SIZE=256"
+    );
+    transformerApplyRoPEProgram = compileProgram(
+      "transformerApplyRoPEProgram", context, deviceIdsToUse, OpenCLKernels::transformerApplyRoPE,
+      maybeFP16CompileOptions
+    );
+    transformerSwiGLUProgram = compileProgram(
+      "transformerSwiGLUProgram", context, deviceIdsToUse, OpenCLKernels::transformerSwiGLU,
+      maybeFP16CompileOptions
     );
     extractChannel0NCHWProgram = compileProgram(
       "extractChannel0NCHWProgram", context, deviceIdsToUse, OpenCLKernels::extractChannel0NCHW,
@@ -316,6 +364,24 @@ struct CompiledPrograms {
   }
 
   ~CompiledPrograms() {
+    for(auto& it: attentionProgramsByHeadDims)
+      clReleaseProgram(it.second);
+  }
+
+  //The attention kernel keeps a query and an accumulator in registers, so head dims are compile time constants
+  cl_program getAttentionProgram(int qHeadDim, int vHeadDim) {
+    std::lock_guard<std::mutex> lock(attentionProgramsMutex);
+    auto it = attentionProgramsByHeadDims.find(make_pair(qHeadDim,vHeadDim));
+    if(it != attentionProgramsByHeadDims.end())
+      return it->second;
+    //Always computes in fp32, only the storage precision matters
+    string options = (usingFP16Storage ? OpenCLKernels::fp16StorageDefine : string()) +
+      " -DATTN_HEAD_DIM=" + Global::intToString(qHeadDim) + " -DATTN_V_HEAD_DIM=" + Global::intToString(vHeadDim);
+    cl_program program = compileProgram(
+      "transformerAttentionProgram", context, deviceIds, OpenCLKernels::transformerAttention, options
+    );
+    attentionProgramsByHeadDims[make_pair(qHeadDim,vHeadDim)] = program;
+    return program;
   }
 
   CompiledPrograms() = delete;
@@ -492,14 +558,17 @@ struct ComputeHandleInternal {
   CLKernel winogradConv3x3NCHWTransformKernel;
   CLKernel winogradConv3x3NCHWBNReluTransformKernel;
   CLKernel winogradConv3x3NCHWBNMishTransformKernel;
+  CLKernel winogradConv3x3NCHWBNSiluTransformKernel;
   CLKernel winogradConv3x3NCHWUntransformKernel;
   CLKernel winogradConv5x5NCHWTransformKernel;
   CLKernel winogradConv5x5NCHWBNReluTransformKernel;
   CLKernel winogradConv5x5NCHWBNMishTransformKernel;
+  CLKernel winogradConv5x5NCHWBNSiluTransformKernel;
   CLKernel winogradConv5x5NCHWUntransformKernel;
   CLKernel scaleBiasMaskNCHWKernel;
   CLKernel scaleBiasMaskReluNCHWKernel;
   CLKernel scaleBiasMaskMishNCHWKernel;
+  CLKernel scaleBiasMaskSiluNCHWKernel;
   CLKernel addPointWiseKernel;
   CLKernel sumChannelsNCHWKernel;
   CLKernel gPoolChannelsNCHWMaskKernel;
@@ -508,11 +577,19 @@ struct ComputeHandleInternal {
   CLKernel addCBiasesNCKernel;
   CLKernel addCBiasesNCReluKernel;
   CLKernel addCBiasesNCMishKernel;
+  CLKernel addCBiasesNCSiluKernel;
   CLKernel extractChannel0NCHWKernel;
   CLKernel xgemmDirectBatchedTTKernelAlwaysFP32;
   CLKernel xgemmDirectStridedBatchedNNKernel;
   CLKernel xgemmBatchedNNKernel;
   CLKernel hgemmWmmaNCHWKernel;
+  CLKernel transformerRMSNormKernel;
+  CLKernel transformerSpatialRMSNormSumSqKernel;
+  CLKernel transformerSpatialRMSNormApplyKernel;
+  CLKernel transformerApplyRoPEKernel;
+  CLKernel transformerSwiGLUKernel;
+  CompiledPrograms* compiledPrograms;
+  map<pair<int,int>,cl_kernel> attentionKernelsByHeadDims;
 
   std::vector<const char*> profileAddeds;
   std::map<const char*, int*> counters;
@@ -529,6 +606,7 @@ struct ComputeHandleInternal {
     commandQueue = device->commandQueue;
     CompiledPrograms* progs = computeContext->compiledProgramsByDeviceId[device->info.deviceId];
     assert(progs != NULL);
+    compiledPrograms = progs;
     tuneParams = progs->tuneParams;
 
     if(inputsUseNHWC != false)
@@ -551,6 +629,8 @@ struct ComputeHandleInternal {
     CHECK_ERR(err);
     winogradConv3x3NCHWBNMishTransformKernel = clCreateKernel(progs->winogradConv3x3NCHWBNMishTransformProgram, "bnActTransform", &err);
     CHECK_ERR(err);
+    winogradConv3x3NCHWBNSiluTransformKernel = clCreateKernel(progs->winogradConv3x3NCHWBNSiluTransformProgram, "bnActTransform", &err);
+    CHECK_ERR(err);
     winogradConv3x3NCHWUntransformKernel = clCreateKernel(progs->winogradConv3x3NCHWUntransformProgram, "untransform", &err);
     CHECK_ERR(err);
 
@@ -560,6 +640,8 @@ struct ComputeHandleInternal {
     CHECK_ERR(err);
     winogradConv5x5NCHWBNMishTransformKernel = clCreateKernel(progs->winogradConv5x5NCHWBNMishTransformProgram, "bnActTransform", &err);
     CHECK_ERR(err);
+    winogradConv5x5NCHWBNSiluTransformKernel = clCreateKernel(progs->winogradConv5x5NCHWBNSiluTransformProgram, "bnActTransform", &err);
+    CHECK_ERR(err);
     winogradConv5x5NCHWUntransformKernel = clCreateKernel(progs->winogradConv5x5NCHWUntransformProgram, "untransform", &err);
     CHECK_ERR(err);
 
@@ -568,6 +650,8 @@ struct ComputeHandleInternal {
     scaleBiasMaskReluNCHWKernel = clCreateKernel(progs->scaleBiasMaskReluNCHWProgram, "scaleBiasMaskActNCHW", &err);
     CHECK_ERR(err);
     scaleBiasMaskMishNCHWKernel = clCreateKernel(progs->scaleBiasMaskMishNCHWProgram, "scaleBiasMaskActNCHW", &err);
+    CHECK_ERR(err);
+    scaleBiasMaskSiluNCHWKernel = clCreateKernel(progs->scaleBiasMaskSiluNCHWProgram, "scaleBiasMaskActNCHW", &err);
     CHECK_ERR(err);
     addPointWiseKernel = clCreateKernel(progs->addPointWiseProgram, "addPointWise", &err);
     CHECK_ERR(err);
@@ -584,6 +668,18 @@ struct ComputeHandleInternal {
     addCBiasesNCReluKernel = clCreateKernel(progs->addCBiasesNCReluProgram, "addCBiasesNCAct", &err);
     CHECK_ERR(err);
     addCBiasesNCMishKernel = clCreateKernel(progs->addCBiasesNCMishProgram, "addCBiasesNCAct", &err);
+    CHECK_ERR(err);
+    addCBiasesNCSiluKernel = clCreateKernel(progs->addCBiasesNCSiluProgram, "addCBiasesNCAct", &err);
+    CHECK_ERR(err);
+    transformerRMSNormKernel = clCreateKernel(progs->transformerRMSNormProgram, "transformerRMSNorm", &err);
+    CHECK_ERR(err);
+    transformerSpatialRMSNormSumSqKernel = clCreateKernel(progs->transformerSpatialRMSNormProgram, "transformerSpatialRMSNormSumSq", &err);
+    CHECK_ERR(err);
+    transformerSpatialRMSNormApplyKernel = clCreateKernel(progs->transformerSpatialRMSNormProgram, "transformerSpatialRMSNormApply", &err);
+    CHECK_ERR(err);
+    transformerApplyRoPEKernel = clCreateKernel(progs->transformerApplyRoPEProgram, "transformerApplyRoPE", &err);
+    CHECK_ERR(err);
+    transformerSwiGLUKernel = clCreateKernel(progs->transformerSwiGLUProgram, "transformerSwiGLU", &err);
     CHECK_ERR(err);
     extractChannel0NCHWKernel = clCreateKernel(progs->extractChannel0NCHWProgram, "extractChannel0NCHW", &err);
     CHECK_ERR(err);
@@ -605,6 +701,20 @@ struct ComputeHandleInternal {
       if(profileEvents[i] != NULL)
         clReleaseEvent(profileEvents[i]);
     }
+    for(auto& it: attentionKernelsByHeadDims)
+      clReleaseKernel(it.second);
+  }
+
+  //Kernel objects hold their arguments, so each handle gets its own
+  cl_kernel getAttentionKernel(int qHeadDim, int vHeadDim) {
+    auto it = attentionKernelsByHeadDims.find(make_pair(qHeadDim,vHeadDim));
+    if(it != attentionKernelsByHeadDims.end())
+      return it->second;
+    cl_int err;
+    cl_kernel kernel = clCreateKernel(compiledPrograms->getAttentionProgram(qHeadDim,vHeadDim), "transformerAttention", &err);
+    CHECK_ERR(err);
+    attentionKernelsByHeadDims[make_pair(qHeadDim,vHeadDim)] = kernel;
+    return kernel;
   }
 
   ComputeHandleInternal() = delete;
@@ -900,6 +1010,8 @@ struct BatchNormLayer {
       kernel = handle->scaleBiasMaskReluNCHWKernel;
     else if(activation == ACTIVATION_MISH)
       kernel = handle->scaleBiasMaskMishNCHWKernel;
+    else if(activation == ACTIVATION_SILU)
+      kernel = handle->scaleBiasMaskSiluNCHWKernel;
     else
       assert(false);
 
@@ -1307,13 +1419,16 @@ struct ConvLayer {
   ) const {
     if((convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5)) {
       {
-        assert(bnLayer->activation == ACTIVATION_RELU || bnLayer->activation == ACTIVATION_MISH);
+        assert(bnLayer->activation == ACTIVATION_RELU || bnLayer->activation == ACTIVATION_MISH || bnLayer->activation == ACTIVATION_SILU);
+        bool is3x3 = convXSize == 3 && convYSize == 3;
+        cl_kernel transformKernel =
+          bnLayer->activation == ACTIVATION_RELU ? (is3x3 ? handle->winogradConv3x3NCHWBNReluTransformKernel : handle->winogradConv5x5NCHWBNReluTransformKernel) :
+          bnLayer->activation == ACTIVATION_MISH ? (is3x3 ? handle->winogradConv3x3NCHWBNMishTransformKernel : handle->winogradConv5x5NCHWBNMishTransformKernel) :
+          (is3x3 ? handle->winogradConv3x3NCHWBNSiluTransformKernel : handle->winogradConv5x5NCHWBNSiluTransformKernel);
         cl_int err;
         MAYBE_EVENT;
         err = doWinogradTransformWithBNAct(
-          (convXSize == 3 && convYSize == 3) ?
-          (bnLayer->activation == ACTIVATION_RELU ? handle->winogradConv3x3NCHWBNReluTransformKernel : handle->winogradConv3x3NCHWBNMishTransformKernel) :
-          (bnLayer->activation == ACTIVATION_RELU ? handle->winogradConv5x5NCHWBNReluTransformKernel : handle->winogradConv5x5NCHWBNMishTransformKernel),
+          transformKernel,
           handle->commandQueue,
           handle->tuneParams,
           input,convWorkspace,
@@ -1486,6 +1601,8 @@ struct MatBiasLayer {
       kernel = handle->addCBiasesNCReluKernel;
     else if(activation == ACTIVATION_MISH)
       kernel = handle->addCBiasesNCMishKernel;
+    else if(activation == ACTIVATION_SILU)
+      kernel = handle->addCBiasesNCSiluKernel;
     else
       assert(false);
 
@@ -1568,6 +1685,370 @@ struct NormActConv {
 
 };
 
+
+//--------------------------------------------------------------
+// Transformer layers, ported from upstream KataGo. Everything stays in the NCHW layout of the rest of the
+// backend: the projections are 1x1 convolutions and a (N, heads*headDim, HW) tensor is directly the
+// (N*heads, headDim, HW) layout the RoPE and attention kernels expect.
+// Off-board positions end up exactly 0 in every residual (masked norm output, masked queries), so the
+// residuals can be added without masking.
+
+static constexpr int TRANSFORMER_RMSNORM_WG_XY_SIZE = 8;
+static constexpr int TRANSFORMER_RMSNORM_WG_C_SIZE = 32;
+
+static std::unique_ptr<ConvLayer> makeConv1x1OfMatMul(ComputeHandleInternal* handle, const MatMulLayerDesc& matMul, int nnX, int nnY, bool useFP16) {
+  ConvLayerDesc convDesc;
+  convDesc.name = matMul.name;
+  convDesc.convYSize = 1;
+  convDesc.convXSize = 1;
+  convDesc.inChannels = matMul.inChannels;
+  convDesc.outChannels = matMul.outChannels;
+  convDesc.dilationY = 1;
+  convDesc.dilationX = 1;
+  //Conv weights are oc,ic, matmul weights are ic,oc
+  convDesc.weights.resize((size_t)matMul.inChannels * matMul.outChannels);
+  for(int oc = 0; oc < matMul.outChannels; oc++)
+    for(int ic = 0; ic < matMul.inChannels; ic++)
+      convDesc.weights[(size_t)oc * matMul.inChannels + ic] = matMul.weights[(size_t)ic * matMul.outChannels + oc];
+  return std::make_unique<ConvLayer>(handle,&convDesc,nnX,nnY,useFP16);
+}
+
+//RMSNorm per position over channels with weight and beta, masked output. In place is fine.
+struct TransformerRMSNormLayer {
+  const string name;
+  const int numChannels;
+  const float epsilon;
+  const int nnXLen;
+  const int nnYLen;
+  cl_mem weightBuf;
+  cl_mem betaBuf;
+
+  TransformerRMSNormLayer(
+    ComputeHandleInternal* handle, const string& n, int numC, float eps, const vector<float>& weight, const vector<float>& beta, int nnX, int nnY
+  ) :
+    name(n),
+    numChannels(numC),
+    epsilon(eps),
+    nnXLen(nnX),
+    nnYLen(nnY)
+  {
+    assert(weight.size() == numChannels && beta.size() == numChannels);
+    vector<float> w = weight;
+    vector<float> b = beta;
+    weightBuf = createReadOnlyBuffer(handle,w,false);
+    betaBuf = createReadOnlyBuffer(handle,b,false);
+  }
+
+  ~TransformerRMSNormLayer() {
+    clReleaseMemObject(weightBuf);
+    clReleaseMemObject(betaBuf);
+  }
+
+  void apply(ComputeHandleInternal* handle, int batchSize, cl_mem input, cl_mem output, cl_mem mask) const {
+    cl_kernel kernel = handle->transformerRMSNormKernel;
+    int xySize = nnXLen * nnYLen;
+    clSetKernelArg(kernel, 0, sizeof(cl_mem), (const void *)&input);
+    clSetKernelArg(kernel, 1, sizeof(cl_mem), (const void *)&output);
+    clSetKernelArg(kernel, 2, sizeof(cl_mem), (const void *)&weightBuf);
+    clSetKernelArg(kernel, 3, sizeof(cl_mem), (const void *)&betaBuf);
+    clSetKernelArg(kernel, 4, sizeof(cl_mem), (const void *)&mask);
+    clSetKernelArg(kernel, 5, sizeof(int), (const void *)&batchSize);
+    clSetKernelArg(kernel, 6, sizeof(int), (const void *)&numChannels);
+    clSetKernelArg(kernel, 7, sizeof(int), (const void *)&xySize);
+    clSetKernelArg(kernel, 8, sizeof(float), (const void *)&epsilon);
+
+    static constexpr int localSize = TRANSFORMER_RMSNORM_WG_XY_SIZE * TRANSFORMER_RMSNORM_WG_C_SIZE;
+    int numXYGroups = (xySize + TRANSFORMER_RMSNORM_WG_XY_SIZE - 1) / TRANSFORMER_RMSNORM_WG_XY_SIZE;
+    size_t globalSizes[2] = {(size_t)numXYGroups * localSize, (size_t)batchSize};
+    size_t localSizes[2] = {(size_t)localSize, 1};
+    MAYBE_EVENT;
+    cl_int err = clEnqueueNDRangeKernel(handle->commandQueue, kernel, 2, NULL, globalSizes, localSizes, 0, NULL, MAYBE_EVENTREF);
+    CHECK_ERR(err);
+    MAYBE_PROFILE("TransformerRMSNorm");
+    MAYBE_FREE_EVENT;
+  }
+
+  TransformerRMSNormLayer() = delete;
+  TransformerRMSNormLayer(const TransformerRMSNormLayer&) = delete;
+  TransformerRMSNormLayer& operator=(const TransformerRMSNormLayer&) = delete;
+};
+
+//RMSNorm at the trunk tip with gamma, beta and the trunk tip activation
+struct RMSNormTipLayer {
+  const string name;
+  const int numChannels;
+  const float epsilon;
+  const bool spatial;
+  const int nnXLen;
+  const int nnYLen;
+  cl_mem gammaBuf;
+  cl_mem betaBuf;
+  std::unique_ptr<TransformerRMSNormLayer> perPositionNorm;
+  //Plain activation pass (identity scale and bias), only if the activation isn't identity
+  std::unique_ptr<BatchNormLayer> activationLayer;
+
+  RMSNormTipLayer(ComputeHandleInternal* handle, const RMSNormLayerDesc* desc, const ActivationLayerDesc* actDesc, int nnX, int nnY, bool useFP16) :
+    name(desc->name),
+    numChannels(desc->numChannels),
+    epsilon(desc->epsilon),
+    spatial(desc->spatial),
+    nnXLen(nnX),
+    nnYLen(nnY)
+  {
+    vector<float> gamma = desc->gamma;
+    vector<float> beta = desc->beta;
+    gammaBuf = createReadOnlyBuffer(handle,gamma,false);
+    betaBuf = createReadOnlyBuffer(handle,beta,false);
+    if(!spatial)
+      perPositionNorm = std::make_unique<TransformerRMSNormLayer>(handle,name,numChannels,epsilon,desc->gamma,desc->beta,nnX,nnY);
+    if(actDesc->activation != ACTIVATION_IDENTITY) {
+      BatchNormLayerDesc actBN;
+      actBN.name = actDesc->name;
+      actBN.numChannels = numChannels;
+      actBN.epsilon = 0.0f;
+      actBN.hasScale = true;
+      actBN.hasBias = true;
+      actBN.mean.assign(numChannels, 0.0f);
+      actBN.variance.assign(numChannels, 1.0f);
+      actBN.scale.assign(numChannels, 1.0f);
+      actBN.bias.assign(numChannels, 0.0f);
+      activationLayer = std::make_unique<BatchNormLayer>(handle,&actBN,actDesc,nnX,nnY,useFP16);
+    }
+  }
+
+  ~RMSNormTipLayer() {
+    clReleaseMemObject(gammaBuf);
+    clReleaseMemObject(betaBuf);
+  }
+
+  //In place is fine
+  void apply(ComputeHandleInternal* handle, ScratchBuffers* scratch, int batchSize, cl_mem input, cl_mem output, cl_mem mask, cl_mem maskSum) const {
+    if(!spatial)
+      perPositionNorm->apply(handle,batchSize,input,output,mask);
+    else {
+      int xySize = nnXLen * nnYLen;
+      SizedBuf<cl_mem> sumSq(scratch->allocator, scratch->getBufSizeFloat(1));
+      {
+        cl_kernel kernel = handle->transformerSpatialRMSNormSumSqKernel;
+        clSetKernelArg(kernel, 0, sizeof(cl_mem), (const void *)&input);
+        clSetKernelArg(kernel, 1, sizeof(cl_mem), (const void *)&mask);
+        clSetKernelArg(kernel, 2, sizeof(cl_mem), (const void *)&sumSq.buf);
+        clSetKernelArg(kernel, 3, sizeof(int), (const void *)&batchSize);
+        clSetKernelArg(kernel, 4, sizeof(int), (const void *)&numChannels);
+        clSetKernelArg(kernel, 5, sizeof(int), (const void *)&xySize);
+        size_t globalSizes[2] = {256, (size_t)batchSize};
+        size_t localSizes[2] = {256, 1};
+        MAYBE_EVENT;
+        cl_int err = clEnqueueNDRangeKernel(handle->commandQueue, kernel, 2, NULL, globalSizes, localSizes, 0, NULL, MAYBE_EVENTREF);
+        CHECK_ERR(err);
+        MAYBE_PROFILE("SpatialRMSNormSumSq");
+        MAYBE_FREE_EVENT;
+      }
+      {
+        cl_kernel kernel = handle->transformerSpatialRMSNormApplyKernel;
+        clSetKernelArg(kernel, 0, sizeof(cl_mem), (const void *)&input);
+        clSetKernelArg(kernel, 1, sizeof(cl_mem), (const void *)&output);
+        clSetKernelArg(kernel, 2, sizeof(cl_mem), (const void *)&gammaBuf);
+        clSetKernelArg(kernel, 3, sizeof(cl_mem), (const void *)&betaBuf);
+        clSetKernelArg(kernel, 4, sizeof(cl_mem), (const void *)&mask);
+        clSetKernelArg(kernel, 5, sizeof(cl_mem), (const void *)&maskSum);
+        clSetKernelArg(kernel, 6, sizeof(cl_mem), (const void *)&sumSq.buf);
+        clSetKernelArg(kernel, 7, sizeof(int), (const void *)&batchSize);
+        clSetKernelArg(kernel, 8, sizeof(int), (const void *)&numChannels);
+        clSetKernelArg(kernel, 9, sizeof(int), (const void *)&xySize);
+        clSetKernelArg(kernel, 10, sizeof(float), (const void *)&epsilon);
+        size_t globalSizes[2] = {powerOf2ify(xySize), powerOf2ify(numChannels)};
+        MAYBE_EVENT;
+        cl_int err = clEnqueueNDRangeKernel(handle->commandQueue, kernel, 2, NULL, globalSizes, NULL, 0, NULL, MAYBE_EVENTREF);
+        CHECK_ERR(err);
+        MAYBE_PROFILE("SpatialRMSNormApply");
+        MAYBE_FREE_EVENT;
+      }
+    }
+    if(activationLayer != nullptr)
+      activationLayer->apply(handle,batchSize,output,output,mask);
+  }
+
+  RMSNormTipLayer() = delete;
+  RMSNormTipLayer(const RMSNormTipLayer&) = delete;
+  RMSNormTipLayer& operator=(const RMSNormTipLayer&) = delete;
+};
+
+struct TransformerAttentionLayer {
+  const string name;
+  const int numHeads;
+  const int numKVHeads;
+  const int qHeadDim;
+  const int vHeadDim;
+  const int numChannels;
+  const int nnXLen;
+  const int nnYLen;
+
+  const TransformerRMSNormLayer preLN;
+  std::unique_ptr<ConvLayer> qProj;
+  std::unique_ptr<ConvLayer> kProj;
+  std::unique_ptr<ConvLayer> vProj;
+  std::unique_ptr<ConvLayer> outProj;
+  cl_mem ropeCosBuf;
+  cl_mem ropeSinBuf;
+  cl_kernel attentionKernel; //owned by the handle
+
+  TransformerAttentionLayer(ComputeHandleInternal* handle, const TransformerAttentionDesc* desc, int nnX, int nnY, bool useFP16) :
+    name(desc->name),
+    numHeads(desc->numHeads),
+    numKVHeads(desc->numKVHeads),
+    qHeadDim(desc->qHeadDim),
+    vHeadDim(desc->vHeadDim),
+    numChannels(desc->preLN.numChannels),
+    nnXLen(nnX),
+    nnYLen(nnY),
+    preLN(handle,desc->preLN.name,desc->preLN.numChannels,desc->preLN.epsilon,desc->preLN.weight,vector<float>(desc->preLN.numChannels,0.0f),nnX,nnY)
+  {
+    qProj = makeConv1x1OfMatMul(handle,desc->qProj,nnX,nnY,useFP16);
+    kProj = makeConv1x1OfMatMul(handle,desc->kProj,nnX,nnY,useFP16);
+    vProj = makeConv1x1OfMatMul(handle,desc->vProj,nnX,nnY,useFP16);
+    outProj = makeConv1x1OfMatMul(handle,desc->outProj,nnX,nnY,useFP16);
+    vector<float> cosTable;
+    vector<float> sinTable;
+    desc->computeRopeCosSin(nnX,nnY,nnX*nnY,cosTable,sinTable);
+    ropeCosBuf = createReadOnlyBuffer(handle,cosTable,false);
+    ropeSinBuf = createReadOnlyBuffer(handle,sinTable,false);
+    attentionKernel = handle->getAttentionKernel(qHeadDim,vHeadDim);
+  }
+
+  ~TransformerAttentionLayer() {
+    clReleaseMemObject(ropeCosBuf);
+    clReleaseMemObject(ropeSinBuf);
+  }
+
+  void applyRoPE(ComputeHandleInternal* handle, int batchSize, cl_mem data, int numBufHeads) const {
+    cl_kernel kernel = handle->transformerApplyRoPEKernel;
+    int xySize = nnXLen * nnYLen;
+    int numPairs = qHeadDim / 2;
+    clSetKernelArg(kernel, 0, sizeof(cl_mem), (const void *)&data);
+    clSetKernelArg(kernel, 1, sizeof(cl_mem), (const void *)&ropeCosBuf);
+    clSetKernelArg(kernel, 2, sizeof(cl_mem), (const void *)&ropeSinBuf);
+    clSetKernelArg(kernel, 3, sizeof(int), (const void *)&batchSize);
+    clSetKernelArg(kernel, 4, sizeof(int), (const void *)&numBufHeads);
+    clSetKernelArg(kernel, 5, sizeof(int), (const void *)&numKVHeads);
+    clSetKernelArg(kernel, 6, sizeof(int), (const void *)&qHeadDim);
+    clSetKernelArg(kernel, 7, sizeof(int), (const void *)&xySize);
+    clSetKernelArg(kernel, 8, sizeof(int), (const void *)&numPairs);
+    size_t globalSizes[3] = {(size_t)roundUpToMultipleInt(xySize,32), (size_t)numPairs, (size_t)batchSize * numBufHeads};
+    MAYBE_EVENT;
+    cl_int err = clEnqueueNDRangeKernel(handle->commandQueue, kernel, 3, NULL, globalSizes, NULL, 0, NULL, MAYBE_EVENTREF);
+    CHECK_ERR(err);
+    MAYBE_PROFILE("TransformerRoPE");
+    MAYBE_FREE_EVENT;
+  }
+
+  void apply(
+    ComputeHandleInternal* handle, ScratchBuffers* scratch, int batchSize,
+    cl_mem trunk, cl_mem trunkScratch, cl_mem mask, cl_mem convWorkspace, cl_mem convWorkspace2
+  ) const {
+    int xySize = nnXLen * nnYLen;
+    SizedBuf<cl_mem> normed(scratch->allocator, scratch->getBufSizeXY(numChannels));
+    SizedBuf<cl_mem> q(scratch->allocator, scratch->getBufSizeXY(numHeads * qHeadDim));
+    SizedBuf<cl_mem> k(scratch->allocator, scratch->getBufSizeXY(numKVHeads * qHeadDim));
+    SizedBuf<cl_mem> v(scratch->allocator, scratch->getBufSizeXY(numKVHeads * vHeadDim));
+    SizedBuf<cl_mem> attnOut(scratch->allocator, scratch->getBufSizeXY(numHeads * vHeadDim));
+
+    preLN.apply(handle,batchSize,trunk,normed.buf,mask);
+    qProj->apply(handle,batchSize,normed.buf,q.buf,convWorkspace,convWorkspace2);
+    kProj->apply(handle,batchSize,normed.buf,k.buf,convWorkspace,convWorkspace2);
+    vProj->apply(handle,batchSize,normed.buf,v.buf,convWorkspace,convWorkspace2);
+    applyRoPE(handle,batchSize,q.buf,numHeads);
+    applyRoPE(handle,batchSize,k.buf,numKVHeads);
+
+    {
+      cl_kernel kernel = attentionKernel;
+      float scale = 1.0f / sqrtf((float)qHeadDim);
+      clSetKernelArg(kernel, 0, sizeof(cl_mem), (const void *)&q.buf);
+      clSetKernelArg(kernel, 1, sizeof(cl_mem), (const void *)&k.buf);
+      clSetKernelArg(kernel, 2, sizeof(cl_mem), (const void *)&v.buf);
+      clSetKernelArg(kernel, 3, sizeof(cl_mem), (const void *)&attnOut.buf);
+      clSetKernelArg(kernel, 4, sizeof(cl_mem), (const void *)&mask);
+      clSetKernelArg(kernel, 5, sizeof(int), (const void *)&xySize);
+      clSetKernelArg(kernel, 6, sizeof(int), (const void *)&numHeads);
+      clSetKernelArg(kernel, 7, sizeof(int), (const void *)&numKVHeads);
+      clSetKernelArg(kernel, 8, sizeof(float), (const void *)&scale);
+      size_t globalSizes[2] = {(size_t)roundUpToMultipleInt(xySize,32), (size_t)batchSize * numHeads};
+      size_t localSizes[2] = {32, 1};
+      MAYBE_EVENT;
+      cl_int err = clEnqueueNDRangeKernel(handle->commandQueue, kernel, 2, NULL, globalSizes, localSizes, 0, NULL, MAYBE_EVENTREF);
+      CHECK_ERR(err);
+      MAYBE_PROFILE("TransformerAttention");
+      MAYBE_FREE_EVENT;
+    }
+
+    outProj->apply(handle,batchSize,attnOut.buf,trunkScratch,convWorkspace,convWorkspace2);
+    addPointWise(handle, trunk, trunkScratch, batchSize * numChannels * xySize);
+  }
+
+  TransformerAttentionLayer() = delete;
+  TransformerAttentionLayer(const TransformerAttentionLayer&) = delete;
+  TransformerAttentionLayer& operator=(const TransformerAttentionLayer&) = delete;
+};
+
+struct TransformerFFNLayer {
+  const string name;
+  const int numChannels;
+  const int ffnChannels;
+  const int nnXLen;
+  const int nnYLen;
+
+  const TransformerRMSNormLayer preLN;
+  std::unique_ptr<ConvLayer> linear1;
+  std::unique_ptr<ConvLayer> linearGate;
+  std::unique_ptr<ConvLayer> linear2;
+
+  TransformerFFNLayer(ComputeHandleInternal* handle, const TransformerFFNDesc* desc, int nnX, int nnY, bool useFP16) :
+    name(desc->name),
+    numChannels(desc->numChannels),
+    ffnChannels(desc->ffnChannels),
+    nnXLen(nnX),
+    nnYLen(nnY),
+    preLN(handle,desc->preLN.name,desc->preLN.numChannels,desc->preLN.epsilon,desc->preLN.weight,vector<float>(desc->preLN.numChannels,0.0f),nnX,nnY)
+  {
+    linear1 = makeConv1x1OfMatMul(handle,desc->linear1,nnX,nnY,useFP16);
+    linearGate = makeConv1x1OfMatMul(handle,desc->linearGate,nnX,nnY,useFP16);
+    linear2 = makeConv1x1OfMatMul(handle,desc->linear2,nnX,nnY,useFP16);
+  }
+
+  void apply(
+    ComputeHandleInternal* handle, ScratchBuffers* scratch, int batchSize,
+    cl_mem trunk, cl_mem trunkScratch, cl_mem mask, cl_mem convWorkspace, cl_mem convWorkspace2
+  ) const {
+    int xySize = nnXLen * nnYLen;
+    SizedBuf<cl_mem> normed(scratch->allocator, scratch->getBufSizeXY(numChannels));
+    SizedBuf<cl_mem> mainProj(scratch->allocator, scratch->getBufSizeXY(ffnChannels));
+    SizedBuf<cl_mem> gateProj(scratch->allocator, scratch->getBufSizeXY(ffnChannels));
+
+    preLN.apply(handle,batchSize,trunk,normed.buf,mask);
+    linear1->apply(handle,batchSize,normed.buf,mainProj.buf,convWorkspace,convWorkspace2);
+    linearGate->apply(handle,batchSize,normed.buf,gateProj.buf,convWorkspace,convWorkspace2);
+    {
+      cl_kernel kernel = handle->transformerSwiGLUKernel;
+      int size = batchSize * ffnChannels * xySize;
+      clSetKernelArg(kernel, 0, sizeof(cl_mem), (const void *)&mainProj.buf);
+      clSetKernelArg(kernel, 1, sizeof(cl_mem), (const void *)&gateProj.buf);
+      clSetKernelArg(kernel, 2, sizeof(int), (const void *)&size);
+      size_t globalSizes[1] = {(size_t)roundUpToMultipleInt(size,256)};
+      size_t localSizes[1] = {256};
+      MAYBE_EVENT;
+      cl_int err = clEnqueueNDRangeKernel(handle->commandQueue, kernel, 1, NULL, globalSizes, localSizes, 0, NULL, MAYBE_EVENTREF);
+      CHECK_ERR(err);
+      MAYBE_PROFILE("TransformerSwiGLU");
+      MAYBE_FREE_EVENT;
+    }
+    linear2->apply(handle,batchSize,mainProj.buf,trunkScratch,convWorkspace,convWorkspace2);
+    addPointWise(handle, trunk, trunkScratch, batchSize * numChannels * xySize);
+  }
+
+  TransformerFFNLayer() = delete;
+  TransformerFFNLayer(const TransformerFFNLayer&) = delete;
+  TransformerFFNLayer& operator=(const TransformerFFNLayer&) = delete;
+};
 
 //--------------------------------------------------------------
 
@@ -1878,6 +2359,16 @@ BlockStack::BlockStack(
       );
       blocks.push_back(make_pair(NESTED_BOTTLENECK_BLOCK_KIND,std::move(blockPtr)));
     }
+    else if(descBlocks[i].first == TRANSFORMER_ATTENTION_BLOCK_KIND) {
+      TransformerAttentionDesc* blockDesc = (TransformerAttentionDesc*)descBlocks[i].second.get();
+      unique_ptr_void blockPtr = make_unique_void(new TransformerAttentionLayer(handle,blockDesc,nnXLen,nnYLen,useFP16));
+      blocks.push_back(make_pair(TRANSFORMER_ATTENTION_BLOCK_KIND,std::move(blockPtr)));
+    }
+    else if(descBlocks[i].first == TRANSFORMER_FFN_BLOCK_KIND) {
+      TransformerFFNDesc* blockDesc = (TransformerFFNDesc*)descBlocks[i].second.get();
+      unique_ptr_void blockPtr = make_unique_void(new TransformerFFNLayer(handle,blockDesc,nnXLen,nnYLen,useFP16));
+      blocks.push_back(make_pair(TRANSFORMER_FFN_BLOCK_KIND,std::move(blockPtr)));
+    }
     else {
       ASSERT_UNREACHABLE;
     }
@@ -1902,6 +2393,9 @@ ConvWorkspaceEltsNeeded BlockStack::requiredConvWorkspaceElts(ComputeHandleInter
     else if(blocks[i].first == NESTED_BOTTLENECK_BLOCK_KIND) {
       NestedBottleneckResidualBlock* block = (NestedBottleneckResidualBlock*)blocks[i].second.get();
       maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,block->requiredConvWorkspaceElts(handle,maxBatchSize));
+    }
+    else if(blocks[i].first == TRANSFORMER_ATTENTION_BLOCK_KIND || blocks[i].first == TRANSFORMER_FFN_BLOCK_KIND) {
+      //Only 1x1 convolutions, which need no workspace
     }
     else {
       ASSERT_UNREACHABLE;
@@ -1968,6 +2462,14 @@ void BlockStack::apply(
         convWorkspace2
       );
     }
+    else if(blocks[i].first == TRANSFORMER_ATTENTION_BLOCK_KIND) {
+      TransformerAttentionLayer* block = (TransformerAttentionLayer*)blocks[i].second.get();
+      block->apply(handle,scratch,batchSize,trunk,trunkScratch,mask,convWorkspace,convWorkspace2);
+    }
+    else if(blocks[i].first == TRANSFORMER_FFN_BLOCK_KIND) {
+      TransformerFFNLayer* block = (TransformerFFNLayer*)blocks[i].second.get();
+      block->apply(handle,scratch,batchSize,trunk,trunkScratch,mask,convWorkspace,convWorkspace2);
+    }
     else {
       ASSERT_UNREACHABLE;
     }
@@ -1993,6 +2495,7 @@ struct Trunk {
   std::unique_ptr<MatMulLayer> initialMatMul;
   const BlockStack blocks;
   std::unique_ptr<BatchNormLayer> trunkTipBN;
+  std::unique_ptr<RMSNormTipLayer> trunkTipRMSNorm;
 
   Trunk() = delete;
   Trunk(const Trunk&) = delete;
@@ -2023,7 +2526,10 @@ struct Trunk {
 
     initialConv = std::make_unique<ConvLayer>(handle,&desc->initialConv,nnXLen,nnYLen,useFP16);
     initialMatMul = std::make_unique<MatMulLayer>(handle,&desc->initialMatMul);
-    trunkTipBN = std::make_unique<BatchNormLayer>(handle,&desc->trunkTipBN,&desc->trunkTipActivation,nnXLen,nnYLen,useFP16);
+    if(desc->trunkNormKind == TRUNK_NORM_KIND_RMSNORM)
+      trunkTipRMSNorm = std::make_unique<RMSNormTipLayer>(handle,&desc->trunkTipRMSNorm,&desc->trunkTipActivation,nnXLen,nnYLen,useFP16);
+    else
+      trunkTipBN = std::make_unique<BatchNormLayer>(handle,&desc->trunkTipBN,&desc->trunkTipActivation,nnXLen,nnYLen,useFP16);
   }
 
   ~Trunk() {
@@ -2065,7 +2571,10 @@ struct Trunk {
     addChannelBiases(handle, trunk, trunkScratch.buf, batchSize * trunkNumChannels, nnXLen*nnYLen);
 
     blocks.apply(handle,scratch,batchSize,trunk,trunkScratch.buf,mask,maskSum,convWorkspace,convWorkspace2);
-    trunkTipBN->apply(handle,batchSize,trunk,trunk,mask);
+    if(trunkTipRMSNorm != nullptr)
+      trunkTipRMSNorm->apply(handle,scratch,batchSize,trunk,trunk,mask,maskSum);
+    else
+      trunkTipBN->apply(handle,batchSize,trunk,trunk,mask);
 
     #ifdef DEBUG_INTERMEDIATE_VALUES
     debugPrint4D(string("Trunk tip"), handle, trunk, batchSize, trunkNumChannels, nnXLen, nnYLen, usingNHWC);
