@@ -79,7 +79,11 @@ Ported from upstream KataGo (tf2/tf3 nets). Configs are `b<blocks>c<channels>h<h
 Backends:
 - Eigen: CPU reference.
 - OpenCL: unpadded NCHW. Projections are 1x1 convolutions; the attention kernel is compiled per head dims.
-- CUDA: forced to NHWC. Projections are cuBLAS GEMMs with fp32 accumulation, and the attention kernel is tiled with an online softmax. Supported head dims are 16, 32 and 64.
+- CUDA: forced to NHWC, following upstream's `cudaandrocmbackend.inc`; its kernels are copied unchanged into `cudahelpers.cu` and `cudaflashmma.cuh`.
+  - Q/K/V projections, and the FFN linear1 and gate, each run as one strided-batched cuBLAS GEMM, unless grouped-query heads make the shapes differ.
+  - RoPE rotates Q and K in one launch.
+  - fp16 attention uses upstream's tensor-core flash kernel (sm_75+, head dims 32 and 64).
+  - Otherwise a scalar online-softmax kernel runs, with head dims 16, 32 and 64.
 - TensorRT: refuses transformer models.
 
 Masking: walls inside the box are off-board (spatial plane 0 is 0), so every backend applies the board mask even when the box fills the NN buffer exactly.
