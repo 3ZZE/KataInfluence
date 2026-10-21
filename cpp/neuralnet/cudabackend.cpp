@@ -2217,14 +2217,9 @@ struct Model {
 
     fillMaskFloatBufAndMaskSumBuf(maskBuf,maskFloatBuf,maskSumBuf,usingFP16,batchSize,nnXLen,nnYLen);
 
-    //Don't do any masking if we know the board is exactly the desired size
-    if(requireExactNNLen) {
-      //Set to NULL to signal downstream that this buf doesn't need to be used
-      maskBuf = NULL;
-      maskFloatBuf = NULL;
-      //The global pooling structures need this no matter what, for normalizing based on this and its sqrt.
-      //maskSumBuf = NULL;
-    }
+    //Influence: always mask, even when the box fills the buffer exactly, because walls inside the box are off-board
+    //(spatial plane 0 is 0 there). Upstream skipped masking for exact sizes, which is only valid without walls.
+    (void)requireExactNNLen;
 
     #ifdef DEBUG_INTERMEDIATE_VALUES
     CudaUtils::debugPrint4D(string("Initial bin features"), inputBuf, batchSize, trunk->initialConv->inChannels, nnXLen, nnYLen, inputsUsingNHWC, usingFP16);

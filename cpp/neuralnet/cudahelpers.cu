@@ -1916,6 +1916,9 @@ __device__ __forceinline__ float toFloatT(float x) { return x; }
 __device__ __forceinline__ float toFloatT(half x) { return __half2float(x); }
 __device__ __forceinline__ void storeFloatT(float* p, size_t idx, float v) { p[idx] = v; }
 __device__ __forceinline__ void storeFloatT(half* p, size_t idx, float v) { p[idx] = __float2half(v); }
+// The backend passes a null mask when the board fills the whole buffer (requireExactNNLen)
+template<typename T>
+__device__ __forceinline__ float maskAt(const T* mask, size_t idx) { return mask != NULL ? toFloatT(mask[idx]) : 1.0f; }
 
 __device__ __forceinline__ float applyActivationf(float v, int activation) {
   if(activation == ACTIVATION_RELU)
@@ -1939,7 +1942,7 @@ void rmsNormNHWCKernel(
   int tid = threadIdx.x;
   if(pos >= nSize * xySize)
     return;
-  float maskVal = toFloatT(mask[pos]);
+  float maskVal = maskAt(mask, pos);
   const T* inRow = in + (size_t)pos * cSize;
 
   float acc = 0.0f;
@@ -2001,7 +2004,7 @@ void spatialRMSNormSumSqNHWCKernel(const T* in, const T* mask, float* sumSqOut, 
   const T* inN = in + (size_t)n * total;
   float acc = 0.0f;
   for(int i = tid; i < total; i += blockDim.x) {
-    float val = toFloatT(inN[i]) * toFloatT(mask[n * xySize + i / cSize]);
+    float val = toFloatT(inN[i]) * maskAt(mask, n * xySize + i / cSize);
     acc += val * val;
   }
   sumShared[tid] = acc;
@@ -2023,7 +2026,7 @@ void spatialRMSNormApplyNHWCKernel(
 ) {
   int pos = blockIdx.x;
   int n = pos / xySize;
-  float maskVal = toFloatT(mask[pos]);
+  float maskVal = maskAt(mask, pos);
   float rms = rsqrtf(sumSq[n] / fmaxf(1.0f, maskSum[n] * (float)cSize) + epsilon);
   for(int c = threadIdx.x; c < cSize; c += blockDim.x) {
     size_t idx = (size_t)pos * cSize + c;
@@ -2154,7 +2157,7 @@ void flashAttentionNHWCKernel(
     int qPos = qBlockStart + qi * BLOCK_Q + tid;
     qMask[qi] = 0.0f;
     if(qPos < seqLen) {
-      qMask[qi] = toFloatT(mask[n * seqLen + qPos]);
+      qMask[qi] = maskAt(mask, n * seqLen + qPos);
       if(qMask[qi] != 0.0f) {
         const T* qPtr = Q + ((size_t)n * seqLen + qPos) * qTotalDim + h * qHeadDim;
         #pragma unroll
@@ -2190,7 +2193,7 @@ void flashAttentionNHWCKernel(
     }
     for(int t = tid; t < BLOCK_KV; t += BLOCK_Q) {
       int globalKPos = kvStart + t;
-      kMaskTile[t] = globalKPos < seqLen ? toFloatT(mask[n * seqLen + globalKPos]) : 0.0f;
+      kMaskTile[t] = globalKPos < seqLen ? maskAt(mask, n * seqLen + globalKPos) : 0.0f;
     }
     __syncthreads();
 

@@ -956,6 +956,9 @@ struct ComputeHandle {
     int maxBatchSz,
     bool requireExactNNLen) {
     ctx = context;
+    //Influence: always build the masked network, even when the box fills the buffer exactly, because walls inside the
+    //box are off-board (spatial plane 0 is 0 there). This also keeps old unmasked "exact" plan caches from being used.
+    requireExactNNLen = false;
 
     maxBatchSize = maxBatchSz;
     modelVersion = loadedModel->modelDesc.version;
