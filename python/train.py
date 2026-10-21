@@ -311,6 +311,9 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
         if raw_model.get_norm_kind() == "fixup" or raw_model.get_norm_kind() == "fixscale":
             if group_name == "normal" or group_name == "normal_gamma" or group_name == "output":
                 return 0.000001 * world_size * batch_size / 256.0
+            elif group_name == "normal_attn":
+                # Transformer attention projections, half the weight decay like upstream KataGo
+                return 0.000001 * 0.5 * world_size * batch_size / 256.0
             elif group_name == "noreg":
                 return 0.0
             elif group_name == "output_noreg":
@@ -323,7 +326,7 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
             raw_model.get_norm_kind() == "fixbrenorm" or
             raw_model.get_norm_kind() == "fixscaleonenorm"
         ):
-            if group_name == "normal" or group_name == "normal_gamma":
+            if group_name == "normal" or group_name == "normal_gamma" or group_name == "normal_attn":
                 adaptive_scale = 1.0
                 if "sums" in running_metrics and "norm_normal_batch" in running_metrics["sums"]:
                     norm_normal_batch = running_metrics["sums"]["norm_normal_batch"] / running_metrics["weights"]["norm_normal_batch"]
@@ -335,6 +338,9 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
 
                 # Batch norm gammas can be regularized a bit less, doing them just as much empirically seemed to be a bit more unstable
                 gamma_scale = 0.125 if group_name == "normal_gamma" else 1.0
+                # Transformer attention projections get half the weight decay, like upstream KataGo
+                if group_name == "normal_attn":
+                    gamma_scale = 0.5
 
                 # The theoretical scaling for keeping us confined to a surface of equal model norm should go proportionally with lr_scale.
                 # because the strength of drift away from that surface goes as lr^2 and weight decay itself is scaled by lr, so we need
@@ -371,6 +377,12 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
                 "weight_decay": get_weight_decay(raw_model, lr_scale, warmup_scale=1.0, train_state=train_state, running_metrics=running_metrics, group_name="normal_gamma"),
                 "group_name": "normal_gamma",
             })
+        if len(reg_dict["normal_attn"]) > 0:
+            param_groups.append({
+                "params": reg_dict["normal_attn"],
+                "weight_decay": get_weight_decay(raw_model, lr_scale, warmup_scale=1.0, train_state=train_state, running_metrics=running_metrics, group_name="normal_attn"),
+                "group_name": "normal_attn",
+            })
         param_groups.append({
             "params": reg_dict["output"],
             "weight_decay": get_weight_decay(raw_model, lr_scale, warmup_scale=1.0, train_state=train_state, running_metrics=running_metrics, group_name="output"),
@@ -387,7 +399,7 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
             "group_name": "output_noreg",
         })
         num_params = len(list(raw_model.parameters()))
-        num_reg_dict_params = len(reg_dict["normal"]) + len(reg_dict["normal_gamma"]) + len(reg_dict["output"]) + len(reg_dict["noreg"]) + len(reg_dict["output_noreg"])
+        num_reg_dict_params = len(reg_dict["normal"]) + len(reg_dict["normal_gamma"]) + len(reg_dict["normal_attn"]) + len(reg_dict["output"]) + len(reg_dict["noreg"]) + len(reg_dict["output_noreg"])
         assert num_params == num_reg_dict_params, "Reg dict does not have entries for all params in model"
         return param_groups
 
@@ -630,6 +642,8 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
             if group_name == "normal":
                 group_scale = 1.0
             elif group_name == "normal_gamma":
+                group_scale = 1.0
+            elif group_name == "normal_attn":
                 group_scale = 1.0
             elif group_name == "output":
                 group_scale = 0.5

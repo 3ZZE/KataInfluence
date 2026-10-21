@@ -19,6 +19,8 @@ def act(activation, inplace=False):
         return torch.nn.ELU(inplace=inplace)
     if activation == "mish":
         return torch.nn.Mish(inplace=inplace)
+    if activation == "silu":
+        return torch.nn.SiLU(inplace=inplace)
     if activation == "gelu":
         return torch.nn.GELU(inplace=inplace)
     if activation == "hardswish":
@@ -37,6 +39,8 @@ def compute_gain(activation):
         gain = math.sqrt(1.55052)
     elif activation == "mish":
         gain = math.sqrt(2.210277)
+    elif activation == "silu":
+        gain = math.sqrt(2.0)  # Same as upstream KataGo (theoretically sqrt(2.8108))
     elif activation == "gelu":
         gain = math.sqrt(2.351718)
     elif activation == "identity":
@@ -128,6 +132,59 @@ class BiasMask(torch.nn.Module):
             return (x * self.scale + self.beta) * mask
         else:
             return (x + self.beta) * mask
+
+class RMSNormMask(torch.nn.Module):
+    """RMSNorm with masking for off-board positions, used at the end of the trunk (from upstream KataGo).
+    If spatial, one RMS per sample over channels and on-board positions, otherwise one per position over channels.
+    """
+    def __init__(self, c_in, config: modelconfigs.ModelConfig, spatial: bool):
+        super(RMSNormMask, self).__init__()
+        self.c_in = c_in
+        self.spatial = spatial
+        self.eps = 1e-6
+        if not spatial:
+            self.norm = torch.nn.RMSNorm(c_in, eps=self.eps)
+        else:
+            self.norm = None
+            self.gamma = torch.nn.Parameter(torch.ones(c_in))
+        self.beta = torch.nn.Parameter(torch.zeros(c_in))
+
+    def set_scale(self, scale: Optional[float]):
+        pass  # RMSNorm normalizes by actual magnitude, external fixup scale not needed
+
+    def add_reg_dict(self, reg_dict:Dict[str,List]):
+        if self.norm is not None:
+            reg_dict["output"].append(self.norm.weight)
+        else:
+            reg_dict["output"].append(self.gamma)
+        reg_dict["output"].append(self.beta)
+
+    def set_brenorm_params(self, renorm_avg_momentum: float, rmax: float, dmax: float):
+        pass
+
+    def add_brenorm_clippage(self, upper_rclippage, lower_rclippage, dclippage):
+        pass
+
+    def forward(self, x, mask, mask_sum: float):
+        """
+        Parameters:
+        x: NCHW
+        mask: N1HW
+        mask_sum: scalar
+
+        Returns: NCHW
+        """
+        if not self.spatial:
+            out = x.permute(0, 2, 3, 1)
+            out = self.norm(out)
+            out = out.permute(0, 3, 1, 2)
+            return (out + self.beta.view(1, -1, 1, 1)) * mask
+        else:
+            mask_sum_hw = torch.sum(mask, dim=(2, 3), keepdim=True)
+            mean_sq = torch.sum(x * x * mask, dim=(1, 2, 3), keepdim=True) / (self.c_in * mask_sum_hw + self.eps)
+            rms = torch.sqrt(mean_sq + self.eps)
+            out = x / rms
+            return (out * self.gamma.view(1, -1, 1, 1) + self.beta.view(1, -1, 1, 1)) * mask
 
 
 class NormMask(torch.nn.Module):
@@ -1063,6 +1120,268 @@ class NestedNestedBottleneckResBlock(torch.nn.Module):
         return x + out
 
 
+def compute_learnable_rope_cos_sin(s_x, s_y, freqs):
+    """Rotation tables for learnable 2D RoPE.
+    s_x, s_y: (S,) column and row of each board position
+    freqs: (H_kv, P, 2) learnable frequencies (omega_x, omega_y) per kv head and rotated pair
+    Returns: (cos, sin), each (S, H_kv, P)
+    """
+    angles = s_x.view(-1, 1, 1) * freqs[:, :, 0] + s_y.view(-1, 1, 1) * freqs[:, :, 1]
+    return torch.cos(angles), torch.sin(angles)
+
+def apply_learnable_rotary_emb(x, cos, sin):
+    """Rotates the interleaved pairs (2p, 2p+1) of x: (B, S, H, D) by the angles of cos, sin: (S, H, D/2)."""
+    B, S, H, D = x.shape
+    x0, x1 = x.view(B, S, H, D // 2, 2).unbind(dim=-1)
+    cos = cos.unsqueeze(0).to(dtype=x.dtype)
+    sin = sin.unsqueeze(0).to(dtype=x.dtype)
+    out = torch.stack([x0 * cos - x1 * sin, x0 * sin + x1 * cos], dim=-1)
+    return out.reshape(B, S, H, D)
+
+class TransformerAttentionBlock(torch.nn.Module):
+    """Self-attention half of a pre-norm transformer block over the board positions (from upstream KataGo).
+    RMSNorm -> Q/K/V projections -> learnable 2D RoPE -> attention over on-board keys -> output projection.
+    Returns the residual only, the caller adds it.
+    """
+    def __init__(self, name, c_main, config, pos_len):
+        super(TransformerAttentionBlock, self).__init__()
+        self.name = name
+        self.c_main = c_main
+        self.num_heads = config["transformer_heads"]
+        self.num_kv_heads = config.get("transformer_kv_heads", self.num_heads)
+        assert c_main % self.num_heads == 0, f"Channels {c_main} must be divisible by heads {self.num_heads}"
+        assert self.num_heads % self.num_kv_heads == 0, \
+            f"Query heads ({self.num_heads}) must be divisible by KV heads ({self.num_kv_heads})"
+        self.n_rep = self.num_heads // self.num_kv_heads
+        self.head_dim = c_main // self.num_heads
+        assert self.head_dim % 2 == 0, f"Head dim must be even for RoPE, got {self.head_dim}"
+        # The C++ GPU backends want each projection's total channel count to be a multiple of 8
+        for proj_name, total in (("Q", self.num_heads * self.head_dim), ("KV", self.num_kv_heads * self.head_dim)):
+            assert total % 8 == 0, f"{proj_name} projection channels ({total}) must be a multiple of 8"
+        assert config.get("learnable_rope", False), "Only learnable RoPE is implemented"
+
+        self.q_proj = torch.nn.Linear(c_main, self.num_heads * self.head_dim, bias=False)
+        self.k_proj = torch.nn.Linear(c_main, self.num_kv_heads * self.head_dim, bias=False)
+        self.v_proj = torch.nn.Linear(c_main, self.num_kv_heads * self.head_dim, bias=False)
+        self.out_proj = torch.nn.Linear(self.num_heads * self.head_dim, c_main, bias=False)
+
+        # Learnable 2D RoPE frequencies, geometric init from 1 rad/cell to 1/50 rad/cell with random signs.
+        # This is the only place where the network sees the board geometry apart from the convolutions.
+        num_pairs = self.head_dim // 2
+        log_lo = math.log(1.0 / 50.0)
+        log_hi = math.log(1.0)
+        init_freqs = (
+            torch.exp(torch.empty(self.num_kv_heads, num_pairs, 2).uniform_(log_lo, log_hi))
+            * (torch.randint(0, 2, (self.num_kv_heads, num_pairs, 2)) * 2 - 1).float()
+        )
+        self.rope_freqs = torch.nn.Parameter(init_freqs)  # (num_kv_heads, P, 2)
+        self.pos_len = pos_len
+
+        self.norm1 = torch.nn.RMSNorm(c_main, eps=1e-6)
+
+    def add_reg_dict(self, reg_dict:Dict[str,List]):
+        for name, param in self.named_parameters():
+            if "norm" in name:
+                reg_dict["noreg"].append(param)
+            elif "weight" in name:
+                reg_dict["normal_attn"].append(param)
+            else:
+                reg_dict["noreg"].append(param)
+
+    def initialize(self, fixup_scale):
+        pass
+
+    def set_brenorm_params(self, renorm_avg_momentum, rmax, dmax):
+        pass
+
+    def add_brenorm_clippage(self, upper_rclippage, lower_rclippage, dclippage):
+        pass
+
+    def forward(self, x, mask, mask_sum_hw, mask_sum: float):
+        """
+        Parameters:
+        x: NCHW
+        mask: N1HW
+
+        Returns: NCHW, residual only
+        """
+        batch_size, channels, height, width = x.shape
+        seq_len = height * width
+        x_seq = x.view(batch_size, channels, seq_len).permute(0, 2, 1)
+        x_norm = self.norm1(x_seq)
+
+        q = self.q_proj(x_norm).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        k = self.k_proj(x_norm).view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        v = self.v_proj(x_norm).view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+
+        s_idx = torch.arange(seq_len, device=x.device)
+        s_y = (s_idx // width).float()  # row
+        s_x = (s_idx % width).float()   # col
+        cos_k, sin_k = compute_learnable_rope_cos_sin(s_x, s_y, self.rope_freqs)
+        # Query head h uses kv head h // n_rep, like the C++ backends
+        cos_q = cos_k.repeat_interleave(self.n_rep, dim=1) if self.n_rep > 1 else cos_k
+        sin_q = sin_k.repeat_interleave(self.n_rep, dim=1) if self.n_rep > 1 else sin_k
+        q = apply_learnable_rotary_emb(q, cos_q, sin_q)
+        k = apply_learnable_rotary_emb(k, cos_k, sin_k)
+
+        q = q.permute(0, 2, 1, 3)
+        k = k.permute(0, 2, 1, 3)
+        v = v.permute(0, 2, 1, 3)
+        if self.n_rep > 1:
+            k = k.repeat_interleave(self.n_rep, dim=1)
+            v = v.repeat_interleave(self.n_rep, dim=1)
+
+        # Off-board keys (walls, padding) are excluded. Off-board query rows are garbage, masked later.
+        mask_flat = mask.reshape(batch_size, 1, 1, seq_len)
+        attn_mask = torch.zeros_like(mask_flat, dtype=q.dtype).masked_fill(mask_flat == 0, float("-inf"))
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_mask, dropout_p=0.0, scale=1.0 / math.sqrt(self.head_dim)
+        )
+        attn_output = attn_output.permute(0, 2, 1, 3).reshape(batch_size, seq_len, self.num_heads * self.head_dim)
+        attn_output = self.out_proj(attn_output)
+        return attn_output.permute(0, 2, 1).reshape(batch_size, channels, height, width)
+
+
+class TransformerFFNBlock(torch.nn.Module):
+    """Feed-forward half of a transformer block (from upstream KataGo): RMSNorm -> SwiGLU.
+    Returns the residual only, the caller adds it.
+    """
+    def __init__(self, name, c_main, config):
+        super(TransformerFFNBlock, self).__init__()
+        self.name = name
+        self.c_main = c_main
+        self.ffn_dim = config["transformer_ffn_channels"]
+        self.ffn_linear1 = torch.nn.Linear(c_main, self.ffn_dim, bias=False)
+        self.ffn_linear_gate = torch.nn.Linear(c_main, self.ffn_dim, bias=False)
+        self.ffn_act = torch.nn.SiLU(inplace=False)
+        self.ffn_linear2 = torch.nn.Linear(self.ffn_dim, c_main, bias=False)
+        self.norm = torch.nn.RMSNorm(c_main, eps=1e-6)
+
+    def add_reg_dict(self, reg_dict:Dict[str,List]):
+        for name, param in self.named_parameters():
+            if "norm" in name:
+                reg_dict["noreg"].append(param)
+            elif "weight" in name:
+                reg_dict["normal"].append(param)
+            else:
+                reg_dict["noreg"].append(param)
+
+    def initialize(self, fixup_scale):
+        pass
+
+    def set_brenorm_params(self, renorm_avg_momentum, rmax, dmax):
+        pass
+
+    def add_brenorm_clippage(self, upper_rclippage, lower_rclippage, dclippage):
+        pass
+
+    def forward(self, x, mask, mask_sum_hw, mask_sum: float):
+        batch_size, channels, height, width = x.shape
+        x_seq = x.view(batch_size, channels, height * width).permute(0, 2, 1)
+        xn = self.norm(x_seq)
+        x1 = self.ffn_act(self.ffn_linear1(xn)) * self.ffn_linear_gate(xn)
+        x1 = self.ffn_linear2(x1)
+        return x1.permute(0, 2, 1).reshape(batch_size, channels, height, width)
+
+
+class NestedBottleneckTransformerBlock(torch.nn.Module):
+    """Nested bottleneck block with transformer blocks inside (from upstream KataGo):
+    1x1 conv (c_main -> c_mid), internal_length x (attention, FFN) at c_mid, 1x1 conv (c_mid -> c_main), residual.
+    """
+    def __init__(
+        self,
+        name: str,
+        internal_length: int,
+        c_main: int,
+        c_mid: int,
+        config: modelconfigs.ModelConfig,
+        activation: str,
+        pos_len: int,
+    ):
+        super(NestedBottleneckTransformerBlock, self).__init__()
+        self.name = name
+        self.norm_kind = config["norm_kind"]
+        self.internal_length = internal_length
+        assert internal_length >= 1
+
+        self.normactconvp = NormActConv(
+            c_in=c_main,
+            c_out=c_mid,
+            c_gpool=None,
+            config=config,
+            activation=activation,
+            kernel_size=1,
+            fixup_use_gamma=False,
+        )
+        self.blockstack = torch.nn.ModuleList()
+        for i in range(self.internal_length):
+            self.blockstack.append(TransformerAttentionBlock(
+                name=name+".blockstack.attn"+str(i+1),
+                c_main=c_mid,
+                config=config,
+                pos_len=pos_len,
+            ))
+            self.blockstack.append(TransformerFFNBlock(
+                name=name+".blockstack.ffn"+str(i+1),
+                c_main=c_mid,
+                config=config,
+            ))
+        self.normactconvq = NormActConv(
+            c_in=c_mid,
+            c_out=c_main,
+            c_gpool=None,
+            config=config,
+            activation=activation,
+            kernel_size=1,
+            fixup_use_gamma=True,
+        )
+
+    def initialize(self, fixup_scale):
+        if self.norm_kind == "fixup":
+            self.normactconvp.initialize(scale=math.pow(fixup_scale, 1.0 / (1.0 + self.internal_length)))
+            self.normactconvq.initialize(scale=0.0)
+        elif self.norm_kind == "fixscale" or self.norm_kind == "fixbrenorm" or self.norm_kind == "fixscaleonenorm":
+            self.normactconvp.initialize(scale=1.0, norm_scale=fixup_scale)
+            self.normactconvq.initialize(scale=1.0, norm_scale=1.0 / math.sqrt(self.internal_length+1.0))
+        else:
+            self.normactconvp.initialize(scale=1.0)
+            self.normactconvq.initialize(scale=1.0)
+        # The transformer sublayers keep the default torch init
+        for block in self.blockstack:
+            block.initialize(fixup_scale=1.0)
+
+    def add_reg_dict(self, reg_dict:Dict[str,List]):
+        self.normactconvp.add_reg_dict(reg_dict)
+        for block in self.blockstack:
+            block.add_reg_dict(reg_dict)
+        self.normactconvq.add_reg_dict(reg_dict)
+
+    def set_brenorm_params(self, renorm_avg_momentum: float, rmax: float, dmax: float):
+        self.normactconvp.set_brenorm_params(renorm_avg_momentum, rmax, dmax)
+        self.normactconvq.set_brenorm_params(renorm_avg_momentum, rmax, dmax)
+
+    def add_brenorm_clippage(self, upper_rclippage, lower_rclippage, dclippage):
+        self.normactconvp.add_brenorm_clippage(upper_rclippage, lower_rclippage, dclippage)
+        self.normactconvq.add_brenorm_clippage(upper_rclippage, lower_rclippage, dclippage)
+
+    def forward(self, x, mask, mask_sum_hw, mask_sum: float):
+        """
+        Parameters:
+        x: NCHW
+        mask: N1HW
+        mask_sum_hw: N111
+        mask_sum: scalar
+
+        Returns: NCHW
+        """
+        out = x
+        out = self.normactconvp(out, mask=mask, mask_sum_hw=mask_sum_hw, mask_sum=mask_sum)
+        for block in self.blockstack:
+            out = out + block(out, mask=mask, mask_sum_hw=mask_sum_hw, mask_sum=mask_sum)
+        out = self.normactconvq(out, mask=mask, mask_sum_hw=mask_sum_hw, mask_sum=mask_sum)
+        return x + out
+
+
 class PolicyHead(torch.nn.Module):
     def __init__(self, c_in, c_p1, c_g1, config, activation):
         super(PolicyHead, self).__init__()
@@ -1376,6 +1695,8 @@ class Model(torch.nn.Module):
             self.variance_time_multiplier = 40.0
             self.shortterm_value_error_multiplier = 0.25
             self.shortterm_score_error_multiplier = 150.0
+        # Influence version >= 104: the lead output predicts the moves left until the game ends
+        self.micromoves_multiplier = 800.0
 
         self.trunk_normless = "trunk_normless" in config and config["trunk_normless"]
 
@@ -1465,6 +1786,17 @@ class Model(torch.nn.Module):
                     config=self.config,
                     activation=self.activation,
                 ))
+            elif block_kind == "bottlenest2transformerropesg" or block_kind == "bottlenest3transformerropesg":
+                assert not use_gpool_this_block, "Transformer blocks don't use global pooling"
+                self.blocks.append(NestedBottleneckTransformerBlock(
+                    name=block_name,
+                    internal_length=(2 if block_kind == "bottlenest2transformerropesg" else 3),
+                    c_main=self.c_trunk,
+                    c_mid=self.c_mid,
+                    config=self.config,
+                    activation=self.activation,
+                    pos_len=pos_len,
+                ))
             elif block_kind == "bottlenest2bottlenest2":
                 self.blocks.append(NestedNestedBottleneckResBlock(
                     name=block_name,
@@ -1480,7 +1812,11 @@ class Model(torch.nn.Module):
             else:
                 assert False, f"Unknown block kind: {block_config[1]}"
 
-        if self.trunk_normless:
+        self.trunk_final_rmsnorm = "trunk_final_rmsnorm" in config and config["trunk_final_rmsnorm"]
+        if self.trunk_final_rmsnorm:
+            assert not self.trunk_normless
+            self.norm_trunkfinal = RMSNormMask(self.c_trunk, self.config, spatial=config.get("trunk_rmsnorm_spatial", False))
+        elif self.trunk_normless:
             self.norm_trunkfinal = BiasMask(self.c_trunk, self.config, is_after_batchnorm=True)
         else:
             self.norm_trunkfinal = NormMask(self.c_trunk, self.config, fixup_use_gamma=False, is_last_batchnorm=True)
@@ -1559,6 +1895,7 @@ class Model(torch.nn.Module):
     def add_reg_dict(self, reg_dict:Dict[str,List]):
         reg_dict["normal"] = []
         reg_dict["normal_gamma"] = []
+        reg_dict["normal_attn"] = []
         reg_dict["output"] = []
         reg_dict["noreg"] = []
         reg_dict["output_noreg"] = []
@@ -1764,7 +2101,11 @@ class Model(torch.nn.Module):
         seki_logits = out_seki
         pred_scoremean = out_miscvalue[:, 0] * self.scoremean_multiplier
         pred_scorestdev = SoftPlusWithGradientFloorFunction.apply(out_miscvalue[:, 1], 0.05, False) * self.scorestdev_multiplier
-        pred_lead = out_miscvalue[:, 2] * self.lead_multiplier
+        # Influence version >= 104: moves left until the game ends, in place of lead
+        if self.config["version"] >= 104 and self.config["version"] <= 199:
+            pred_lead = out_miscvalue[:, 2] * self.micromoves_multiplier
+        else:
+            pred_lead = out_miscvalue[:, 2] * self.lead_multiplier
         pred_variance_time = SoftPlusWithGradientFloorFunction.apply(out_miscvalue[:, 3], 0.05, False) * self.variance_time_multiplier
         if self.config["version"] < 14 or (self.config["version"] >= 101 and self.config["version"] <= 199):
             pred_shortterm_value_error = SoftPlusWithGradientFloorFunction.apply(out_moremiscvalue[:,0], 0.05, False) * self.shortterm_value_error_multiplier
@@ -1785,7 +2126,7 @@ class Model(torch.nn.Module):
             seki_logits,        # N, 4, y, x
             pred_scoremean,     # N
             pred_scorestdev,    # N
-            pred_lead,          # N
+            pred_lead,          # N (version >= 104: moves left)
             pred_variance_time, # N
             pred_shortterm_value_error, # N
             pred_shortterm_score_error, # N

@@ -227,6 +227,14 @@ class Metrics:
         loss = huber_loss(pred, target, delta = 8.0)
         return 0.0060 * global_weight * weight * loss
 
+    def loss_micromoves_samplewise(self, pred, target, weight, global_weight):
+        # Influence: moves (decisions) left until the game ends. Same form as the turns-left (scoremean) loss,
+        # measured in units of 40 moves, about one late-game turn.
+        assert pred.shape == (self.n,)
+        assert target.shape == (self.n,)
+        loss = huber_loss(pred / 40.0, target / 40.0, delta = 12.0)
+        return 0.0015 * global_weight * weight * loss
+
     def loss_variance_time_samplewise(self, pred, target, weight, global_weight):
         assert pred.shape == (self.n,)
         assert target.shape == (self.n,)
@@ -275,7 +283,8 @@ class Metrics:
         modelnorm_output = torch.zeros([],device=device,dtype=dtype)
         modelnorm_noreg = torch.zeros([],device=device,dtype=dtype)
         modelnorm_output_noreg = torch.zeros([],device=device,dtype=dtype)
-        for tensor in reg_dict["normal"]:
+        # Transformer attention projections count with the normal weights (adaptive weight decay tracks this norm)
+        for tensor in reg_dict["normal"] + reg_dict.get("normal_attn", []):
             modelnorm_normal += torch.sum(tensor * tensor)
         for tensor in reg_dict["normal_gamma"]:
             modelnorm_normal_gamma += torch.sum(tensor * tensor)
@@ -678,12 +687,22 @@ class Metrics:
             scorebelief_logits,
             global_weight,
         ).sum()
-        loss_lead = self.loss_lead_samplewise(
-            pred_lead,
-            target_lead,
-            target_weight_lead,
-            global_weight,
-        ).sum()
+        # Influence version >= 104: the lead slots (C21 target, C29 weight) hold the moves left
+        predicts_micromoves = raw_model.config["version"] >= 104 and raw_model.config["version"] <= 199
+        if predicts_micromoves:
+            loss_lead = self.loss_micromoves_samplewise(
+                pred_lead,
+                target_lead,
+                target_weight_lead,
+                global_weight,
+            ).sum()
+        else:
+            loss_lead = self.loss_lead_samplewise(
+                pred_lead,
+                target_lead,
+                target_weight_lead,
+                global_weight,
+            ).sum()
         loss_variance_time = self.loss_variance_time_samplewise(
             pred_variance_time,
             target_variance_time,
@@ -761,7 +780,7 @@ class Metrics:
             "sbcdfloss_sum": loss_scorebelief_cdf,
             "sbpdfloss_sum": loss_scorebelief_pdf,
             "sdregloss_sum": loss_scorestdev,
-            "leadloss_sum": loss_lead,
+            ("mmloss_sum" if predicts_micromoves else "leadloss_sum"): loss_lead,
             "vtimeloss_sum": loss_variance_time,
             "evstloss_sum": loss_shortterm_value_error,
             "esstloss_sum": loss_shortterm_score_error,

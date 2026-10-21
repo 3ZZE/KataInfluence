@@ -39,9 +39,22 @@ ModelConfig = Dict[str,Any]
 # version = 13 # V7 features, Adjusted scaling on shortterm score variance, and made C++ side read in scalings.
 # version = 14 # V7 features, Squared softplus for error variance predictions
 # version = 15 # V7 features, Extra nonlinearity for pass output
+# Influence:
+# version = 103 # V102 features
+# version = 104 # V103 features (points-left buckets, value ratio, attack flag, rule flags),
+#                 the former lead output predicts moves left, trunk header has the trunk norm kind
 
 def get_version(config: ModelConfig):
     return config["version"]
+
+def get_inputs_version(config: ModelConfig):
+    version = get_version(config)
+    if version == 103:
+        return 102
+    elif version == 104:
+        return 103
+    else:
+        assert(False)
 
 def get_num_bin_input_features(config: ModelConfig):
     version = get_version(config)
@@ -49,7 +62,7 @@ def get_num_bin_input_features(config: ModelConfig):
         return 22
     elif version == 101 or version == 102:
         return 22
-    elif version == 103:
+    elif version == 103 or version == 104:
         return 32
     else:
         assert(False)
@@ -60,13 +73,13 @@ def get_num_global_input_features(config: ModelConfig):
         return 19
     elif version == 101 or version == 102:
         return 39
-    elif version == 103:
+    elif version == 103 or version == 104:
         return 64
     else:
         assert(False)
 
 b1c6nbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -88,7 +101,7 @@ b1c6nbt = {
 }
 
 b2c16 = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -111,7 +124,7 @@ b2c16 = {
 }
 
 b4c32 = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -136,7 +149,7 @@ b4c32 = {
 }
 
 b6c96 = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -163,7 +176,7 @@ b6c96 = {
 }
 
 b10c128 = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -194,7 +207,7 @@ b10c128 = {
 }
 
 b5c192nbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -220,7 +233,7 @@ b5c192nbt = {
 }
 
 b15c192 = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -256,7 +269,7 @@ b15c192 = {
 }
 
 b20c256 = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -297,7 +310,7 @@ b20c256 = {
 }
 
 b30c256bt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -348,7 +361,7 @@ b30c256bt = {
 }
 
 b24c320bt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -393,7 +406,7 @@ b24c320bt = {
 }
 
 b20c384bt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -435,7 +448,7 @@ b20c384bt = {
 
 
 b10c512lbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -467,7 +480,7 @@ b10c512lbt = {
 
 
 b15c384lbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -503,7 +516,7 @@ b15c384lbt = {
 }
 
 b18c320lbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -542,7 +555,7 @@ b18c320lbt = {
 }
 
 b23c256lbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -586,7 +599,7 @@ b23c256lbt = {
 }
 
 b12c384llbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -620,7 +633,7 @@ b12c384llbt = {
 
 
 b10c384nbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -651,7 +664,7 @@ b10c384nbt = {
 }
 
 b10c256nbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -681,9 +694,159 @@ b10c256nbt = {
     "v2_size":96,
 }
 
+# Transformer trunks (ported from upstream KataGo): nested bottleneck blocks whose inner blocks are
+# pre-norm transformer blocks (attention with learnable 2D RoPE + SwiGLU FFN) at mid_num_channels.
+# Name: b<blocks>c<trunk channels>h<heads>[kv<kv heads>]nbt[3]tflrs ("tf" transformer, "lr" learnable RoPE,
+# "s" SwiGLU, nbt3 = 3 inner transformer blocks per block). Upstream used them with -fson-silu-rsnh.
+# gpool_num_channels is unused by the transformer blocks but the C++ side wants it positive.
+
+# Tiny test configs, the second one also covers grouped-query attention and head dim 16
+b2c64h1nbttflrs = {
+    "version":104,
+    "norm_kind":"fixup",
+    "bnorm_epsilon": 1e-4,
+    "bnorm_running_avg_momentum": 0.001,
+    "initial_conv_1x1": False,
+    "trunk_num_channels":64,
+    "mid_num_channels":32,
+    "gpool_num_channels":16,
+    "use_attention_pool":False,
+    "num_attention_pool_heads":4,
+    "transformer_ffn_channels":64,
+    "transformer_heads":1,
+    "transformer_kv_heads":1,
+    "learnable_rope":True,
+    "block_kind": [[f"block{i}","bottlenest2transformerropesg"] for i in range(1,3)],
+    "p1_num_channels":16,
+    "g1_num_channels":16,
+    "v1_num_channels":16,
+    "sbv2_num_channels":16,
+    "num_scorebeliefs":8,
+    "v2_size":32,
+}
+b2c128h4kv2nbt3tflrs = {
+    "version":104,
+    "norm_kind":"fixup",
+    "bnorm_epsilon": 1e-4,
+    "bnorm_running_avg_momentum": 0.001,
+    "initial_conv_1x1": False,
+    "trunk_num_channels":128,
+    "mid_num_channels":64,
+    "gpool_num_channels":16,
+    "use_attention_pool":False,
+    "num_attention_pool_heads":4,
+    "transformer_ffn_channels":128,
+    "transformer_heads":4,
+    "transformer_kv_heads":2,
+    "learnable_rope":True,
+    "block_kind": [[f"block{i}","bottlenest3transformerropesg"] for i in range(1,3)],
+    "p1_num_channels":16,
+    "g1_num_channels":16,
+    "v1_num_channels":16,
+    "sbv2_num_channels":16,
+    "num_scorebeliefs":8,
+    "v2_size":32,
+}
+
+# Roughly comparable to b10c256nbt
+b10c256h4nbttflrs = {
+    "version":104,
+    "norm_kind":"fixup",
+    "bnorm_epsilon": 1e-4,
+    "bnorm_running_avg_momentum": 0.001,
+    "initial_conv_1x1": False,
+    "trunk_num_channels":256,
+    "mid_num_channels":128,
+    "gpool_num_channels":64,
+    "use_attention_pool":False,
+    "num_attention_pool_heads":4,
+    "transformer_ffn_channels":384,
+    "transformer_heads":4,
+    "transformer_kv_heads":4,
+    "learnable_rope":True,
+    "block_kind": [[f"block{i}","bottlenest2transformerropesg"] for i in range(1,11)],
+    "p1_num_channels":32,
+    "g1_num_channels":32,
+    "v1_num_channels":32,
+    "sbv2_num_channels":64,
+    "num_scorebeliefs":8,
+    "v2_size":96,
+}
+
+# Upstream KataGo sizes (tf2-b10c384, tf3-b10c512, tf3-b11c768)
+b10c384h6nbttflrs = {
+    "version":104,
+    "norm_kind":"fixup",
+    "bnorm_epsilon": 1e-4,
+    "bnorm_running_avg_momentum": 0.001,
+    "initial_conv_1x1": False,
+    "trunk_num_channels":384,
+    "mid_num_channels":192,
+    "gpool_num_channels":48,
+    "use_attention_pool":False,
+    "num_attention_pool_heads":4,
+    "transformer_ffn_channels":512,
+    "transformer_heads":6,
+    "transformer_kv_heads":6,
+    "learnable_rope":True,
+    "block_kind": [[f"block{i}","bottlenest2transformerropesg"] for i in range(1,11)],
+    "p1_num_channels":48,
+    "g1_num_channels":48,
+    "v1_num_channels":96,
+    "sbv2_num_channels":96,
+    "num_scorebeliefs":8,
+    "v2_size":96,
+}
+b10c512h8nbt3tflrs = {
+    "version":104,
+    "norm_kind":"fixup",
+    "bnorm_epsilon": 1e-4,
+    "bnorm_running_avg_momentum": 0.001,
+    "initial_conv_1x1": False,
+    "trunk_num_channels":512,
+    "mid_num_channels":256,
+    "gpool_num_channels":64,
+    "use_attention_pool":False,
+    "num_attention_pool_heads":4,
+    "transformer_ffn_channels":768,
+    "transformer_heads":8,
+    "transformer_kv_heads":8,
+    "learnable_rope":True,
+    "block_kind": [[f"block{i}","bottlenest3transformerropesg"] for i in range(1,11)],
+    "p1_num_channels":64,
+    "g1_num_channels":64,
+    "v1_num_channels":128,
+    "sbv2_num_channels":128,
+    "num_scorebeliefs":8,
+    "v2_size":128,
+}
+b11c768h12nbt3tflrs = {
+    "version":104,
+    "norm_kind":"fixup",
+    "bnorm_epsilon": 1e-4,
+    "bnorm_running_avg_momentum": 0.001,
+    "initial_conv_1x1": False,
+    "trunk_num_channels":768,
+    "mid_num_channels":384,
+    "gpool_num_channels":96,
+    "use_attention_pool":False,
+    "num_attention_pool_heads":4,
+    "transformer_ffn_channels":1152,
+    "transformer_heads":12,
+    "transformer_kv_heads":12,
+    "learnable_rope":True,
+    "block_kind": [[f"block{i}","bottlenest3transformerropesg"] for i in range(1,12)],
+    "p1_num_channels":96,
+    "g1_num_channels":96,
+    "v1_num_channels":192,
+    "sbv2_num_channels":192,
+    "num_scorebeliefs":8,
+    "v2_size":192,
+}
+
 
 b10c480nb3t = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -715,7 +878,7 @@ b10c480nb3t = {
 
 
 b7c384lnbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -743,7 +906,7 @@ b7c384lnbt = {
 }
 
 b5c512nnbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -771,7 +934,7 @@ b5c512nnbt = {
 
 
 b20c384lbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -813,7 +976,7 @@ b20c384lbt = {
 
 
 b30c320 = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -864,7 +1027,7 @@ b30c320 = {
 }
 
 b40c256 = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -925,7 +1088,7 @@ b40c256 = {
 }
 
 b18c384nbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -964,7 +1127,7 @@ b18c384nbt = {
 }
 
 b14c448nbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -999,7 +1162,7 @@ b14c448nbt = {
 }
 
 b40c384 = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -1061,7 +1224,7 @@ b40c384 = {
 
 
 b60c320 = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -1143,7 +1306,7 @@ b60c320 = {
 
 
 b41c384nbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -1205,7 +1368,7 @@ b41c384nbt = {
 }
 
 b32c448nbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -1259,7 +1422,7 @@ b32c448nbt = {
 
 
 b28c512nbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -1308,7 +1471,7 @@ b28c512nbt = {
 }
 
 b20c640nbt = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -1349,7 +1512,7 @@ b20c640nbt = {
 }
 
 sandbox = {
-    "version":103,
+    "version":104,
     "norm_kind":"fixup",
     "bnorm_epsilon": 1e-4,
     "bnorm_running_avg_momentum": 0.001,
@@ -1404,6 +1567,12 @@ base_config_of_name = {
     # Medium model configs, not too different in inference cost from b15c192
     "b15c192": b15c192,
     "b10c256nbt": b10c256nbt,
+    "b2c64h1nbttflrs": b2c64h1nbttflrs,
+    "b2c128h4kv2nbt3tflrs": b2c128h4kv2nbt3tflrs,
+    "b10c256h4nbttflrs": b10c256h4nbttflrs,
+    "b10c384h6nbttflrs": b10c384h6nbttflrs,
+    "b10c512h8nbt3tflrs": b10c512h8nbt3tflrs,
+    "b11c768h12nbt3tflrs": b11c768h12nbt3tflrs,
 
     # Roughly AlphaZero-sized, not too different in inference cost from b20c256
     "b20c256": b20c256,
@@ -1507,6 +1676,10 @@ for name, base_config in list(config_of_name.items()):
     config["activation"] = "mish"
     config_of_name[name+"-mish"] = config
 
+    config = base_config.copy()
+    config["activation"] = "silu"
+    config_of_name[name+"-silu"] = config
+
 for name, base_config in list(config_of_name.items()):
     config = base_config.copy()
     config["use_attention_pool"] = True
@@ -1542,3 +1715,14 @@ for name, base_config in list(config_of_name.items()):
         config["intermediate_head_blocks"] = len(config["block_kind"])
         config["trunk_normless"] = True
         config_of_name[name+"-bnh"] = config
+
+    # RMSNorm before the heads instead of the trunk-final norm (upstream KataGo), no intermediate head
+    config = base_config.copy()
+    config["trunk_final_rmsnorm"] = True
+    config_of_name[name+"-rnh"] = config
+
+    # Same with one RMS over all channels and on-board positions
+    config = base_config.copy()
+    config["trunk_final_rmsnorm"] = True
+    config["trunk_rmsnorm_spatial"] = True
+    config_of_name[name+"-rsnh"] = config
