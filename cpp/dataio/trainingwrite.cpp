@@ -289,8 +289,8 @@ void TrainingWriteBuffers::addRow(
   NNEvaluator* distillEval
 
 ) {
-  static_assert(NNModelVersion::latestInputsVersionImplemented == 102, "");
-  if(inputsVersion < 3 || inputsVersion > 102)
+  static_assert(NNModelVersion::latestInputsVersionImplemented == 103, "");
+  if(inputsVersion < 3 || inputsVersion > 103)
     throw StringError("Training write buffers: Does not support input version: " + Global::intToString(inputsVersion));
 
   int posArea = dataXLen*dataYLen;
@@ -299,6 +299,10 @@ void TrainingWriteBuffers::addRow(
   const int maxMovesLeftTarget = posArea + NNPos::EXTRA_SCORE_DISTR_RADIUS - 1;
   const int movesLeft =
     hasMovesLeftTarget ? std::min(std::max(0, finalBoard->turnNumber - board.turnNumber), maxMovesLeftTarget) : 0;
+  //Moves (decisions) from this position to the end of the game. Forced reinforcement is not a move.
+  //Written from inputs version 103 on (model version 104 trains it in the former lead slot).
+  const bool hasMicroMovesLeftTarget = hasMovesLeftTarget && inputsVersion >= 103;
+  const int microMovesLeft = hasMicroMovesLeftTarget ? std::max(0, finalBoard->movenum - board.movenum) : 0;
   assert(data.hasFullData);
   assert(curRows < maxRows);
 
@@ -312,7 +316,7 @@ void TrainingWriteBuffers::addRow(
     bool inputsUseNHWC = false;
     float* rowBin = binaryInputNCHWUnpacked;
     float* rowGlobal = globalInputNC.data + curRows * numGlobalChannels;
-    static_assert(NNModelVersion::latestInputsVersionImplemented == 102, "");
+    static_assert(NNModelVersion::latestInputsVersionImplemented == 103, "");
     if(inputsVersion == 7) {
       assert(NNInputs::NUM_FEATURES_SPATIAL_V7 == numBinaryChannels);
       assert(NNInputs::NUM_FEATURES_GLOBAL_V7 == numGlobalChannels);
@@ -328,6 +332,12 @@ void TrainingWriteBuffers::addRow(
       assert(NNInputs::NUM_FEATURES_SPATIAL_V102 == numBinaryChannels);
       assert(NNInputs::NUM_FEATURES_GLOBAL_V102 == numGlobalChannels);
       NNInputs::fillRowV102(
+        board, hist, nextPlayer, nnInputParams, dataXLen, dataYLen, inputsUseNHWC, rowBin, rowGlobal);
+    }
+    else if(inputsVersion == 103) {
+      assert(NNInputs::NUM_FEATURES_SPATIAL_V103 == numBinaryChannels);
+      assert(NNInputs::NUM_FEATURES_GLOBAL_V103 == numGlobalChannels);
+      NNInputs::fillRowV103(
         board, hist, nextPlayer, nnInputParams, dataXLen, dataYLen, inputsUseNHWC, rowBin, rowGlobal);
     }
     else
@@ -388,9 +398,9 @@ void TrainingWriteBuffers::addRow(
     for(int t = 0; t < 5; t++)
       rowGlobal[4 * t + 3] = (float)movesLeft;
 
-    // Lead
-    rowGlobal[21] = 0.0f;
-    rowGlobal[29] = 0.0f;
+    // Micro-moves left (the lead slots, lead itself has no meaning in Influence)
+    rowGlobal[21] = (float)microMovesLeft;
+    rowGlobal[29] = hasMicroMovesLeftTarget ? 1.0f : 0.0f;
 
     // Expected time of arrival of winloss variance, in turns.
     // Influence: count player turns, not moves (a turn is dozens of moves, mostly reinforcement points), when the
@@ -439,8 +449,8 @@ void TrainingWriteBuffers::addRow(
     rowGlobal[45] = (float)((gameHash.hash1 >> 22) & 0x3FFFFF);
     rowGlobal[46] = (float)((gameHash.hash1 >> 44) & 0xFFFFF);
 
-    // Various other data
-    rowGlobal[47] = 0.0f;
+    // Inputs version of this row, so training can convert rows written for older inputs (older data has 0 = 102)
+    rowGlobal[47] = (float)inputsVersion;
     rowGlobal[48] = 1.0f;
 
     // Earlier neural net metadata
@@ -661,8 +671,8 @@ void TrainingWriteBuffers::addRow(
     rowGlobal[45] = (float)((gameHash.hash1 >> 22) & 0x3FFFFF);
     rowGlobal[46] = (float)((gameHash.hash1 >> 44) & 0xFFFFF);
 
-    // Various other data
-    rowGlobal[47] = 0.0f;
+    // Inputs version of this row, so training can convert rows written for older inputs (older data has 0 = 102)
+    rowGlobal[47] = (float)inputsVersion;
     rowGlobal[48] = 0.0f;
 
     // Earlier neural net metadata
@@ -851,7 +861,7 @@ TrainingDataWriter::TrainingDataWriter(const string& outDir, ostream* dbgOut, in
   int numGlobalChannels;
   //Note that this inputsVersion is for data writing, it might be different than the inputsVersion used
   //to feed into a model during selfplay
-  static_assert(NNModelVersion::latestInputsVersionImplemented == 102, "");
+  static_assert(NNModelVersion::latestInputsVersionImplemented == 103, "");
   if(inputsVersion == 7) {
     numBinaryChannels = NNInputs::NUM_FEATURES_SPATIAL_V7;
     numGlobalChannels = NNInputs::NUM_FEATURES_GLOBAL_V7;
@@ -863,6 +873,10 @@ TrainingDataWriter::TrainingDataWriter(const string& outDir, ostream* dbgOut, in
   else if(inputsVersion == 102) {
     numBinaryChannels = NNInputs::NUM_FEATURES_SPATIAL_V102;
     numGlobalChannels = NNInputs::NUM_FEATURES_GLOBAL_V102;
+  }
+  else if(inputsVersion == 103) {
+    numBinaryChannels = NNInputs::NUM_FEATURES_SPATIAL_V103;
+    numGlobalChannels = NNInputs::NUM_FEATURES_GLOBAL_V103;
   }
   else {
     throw StringError("TrainingDataWriter: Unsupported inputs version: " + Global::intToString(inputsVersion));

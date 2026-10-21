@@ -1542,21 +1542,25 @@ void NeuralNet::getOutput(
     if(version >= 9) {
       assert(numScoreValueChannels == 6);
       output->movesLeft = inputBuffers->scoreValueResults[row * numScoreValueChannels + 0];
+      output->microMovesLeft = inputBuffers->scoreValueResults[row * numScoreValueChannels + 2];
       output->varTimeLeft = inputBuffers->scoreValueResults[row * numScoreValueChannels + 3];
       output->shorttermWinlossError = inputBuffers->scoreValueResults[row * numScoreValueChannels + 4];
     } else if(version >= 8) {
       assert(numScoreValueChannels == 4);
       output->movesLeft = inputBuffers->scoreValueResults[row * numScoreValueChannels + 0];
+      output->microMovesLeft = 0;
       output->varTimeLeft = inputBuffers->scoreValueResults[row * numScoreValueChannels + 3];
       output->shorttermWinlossError = 0;
     } else if(version >= 4) {
       assert(numScoreValueChannels == 2);
       output->movesLeft = 0;
+      output->microMovesLeft = 0;
       output->varTimeLeft = 0;
       output->shorttermWinlossError = 0;
     } else if(version >= 3) {
       assert(numScoreValueChannels == 1);
       output->movesLeft = 0;
+      output->microMovesLeft = 0;
       output->varTimeLeft = 0;
       output->shorttermWinlossError = 0;
     } else {

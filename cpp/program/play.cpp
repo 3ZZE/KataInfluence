@@ -46,6 +46,10 @@ void GameInitializer::initShared(ConfigParser& cfg, Logger& logger) {
   maxTurns = cfg.contains("maxTurns") ? cfg.getInt("maxTurns", 0, 100000) : 180;
   //Variant rule: no passing (ending the attack phase) while any attack is still legal
   forbidPassUnlessNoOtherMove = cfg.contains("forbidPassUnlessNoOtherMove") ? cfg.getBool("forbidPassUnlessNoOtherMove") : false;
+  //Per-game probability of that variant, for training one net on both rules. Overrides the bool above.
+  forbidPassUnlessNoOtherMoveProb =
+    cfg.contains("forbidPassUnlessNoOtherMoveProb") ? cfg.getDouble("forbidPassUnlessNoOtherMoveProb", 0.0, 1.0)
+    : (forbidPassUnlessNoOtherMove ? 1.0 : 0.0);
   //Starting position variety, see RandomOpening::initStartPosition
   randomStartProb = cfg.contains("randomStartProb") ? cfg.getDouble("randomStartProb", 0.0, 1.0) : 0.0;
   randomWallsProb = cfg.contains("randomWallsProb") ? cfg.getDouble("randomWallsProb", 0.0, 1.0) : 0.0;
@@ -299,7 +303,8 @@ Rules GameInitializer::createRules() {
 Rules GameInitializer::createRulesUnsynchronized() {
   Rules rules;
   rules.maxMoves = maxTurns;
-  rules.forbidPassUnlessNoOtherMove = forbidPassUnlessNoOtherMove;
+  rules.forbidPassUnlessNoOtherMove =
+    forbidPassUnlessNoOtherMoveProb >= 1.0 || (forbidPassUnlessNoOtherMoveProb > 0.0 && rand.nextBool(forbidPassUnlessNoOtherMoveProb));
   return rules;
 }
 

@@ -140,7 +140,8 @@ struct TrainingWriteBuffers {
   //C16-19: MCTS win-loss-noresult estimate td-like target, lambda = 0 (so, actually just the immediate MCTS result).
 
   //C20: Actual final score, from the perspective of the player to move, adjusted for draw utility, zero if C27 is zero.
-  //C21: Lead in points, number of points to make the game fair, zero if C29 is zero.
+  //C21: Influence, inputs version >= 103: number of moves (decisions) until the game ends, zero if C29 is zero.
+  //     (Upstream: lead in points.)
   //C22: Expected arrival time of WL variance.
   //C23-24: Unused
 
@@ -149,7 +150,7 @@ struct TrainingWriteBuffers {
   //C26: Weight assigned to the policy target
   //C27: Weight assigned to the final board ownership target and score distr targets. Most training rows will have this be 1, some will be 0.
   //C28: Weight assigned to the next move policy target
-  //C29: Weight assigned to the lead target
+  //C29: Weight assigned to the C21 target (Influence: 1 on main-line rows from inputs version 103 on)
   //C30: Policy Surprise (for statistical purposes)
   //C31: Policy Entropy (for statistical purposes)
   //C32: Search Entropy (for statistical purposes)
@@ -163,7 +164,7 @@ struct TrainingWriteBuffers {
   //C41-46: 128-bit hash identifying the game, different rows from the same game share the same value.
   //Split into chunks of 22, 22, 20, 22, 22, 20 bits, little-endian style (since floats have > 22 bits of precision).
 
-  //C47: Komi, adjusted for draw utility and points costed or paid so far, from the perspective of the player to move.
+  //C47: Influence: inputs version the row was written with (0 in older data, which is inputs version 102).
   //C48: 1 if we're in an area-scoring-like phase of the game (area scoring or second encore territory scoring)
 
   //C49: 1 if an earlier neural net started this game, compared to the latest in this data file.
