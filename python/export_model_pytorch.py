@@ -19,7 +19,8 @@ import torch.nn
 from torch.optim.swa_utils import AveragedModel
 
 import modelconfigs
-from model_pytorch import Model, ResBlock, NestedBottleneckResBlock
+from model_pytorch import Model, ResBlock, NestedBottleneckResBlock, RMSNormMask
+from model_pytorch import TransformerAttentionBlock, TransformerFFNBlock, NestedBottleneckTransformerBlock
 from load_model import load_model
 
 #Command and args-------------------------------------------------------------------
@@ -89,6 +90,8 @@ def main(args):
         assert model.variance_time_multiplier == 40.0
         assert model.shortterm_value_error_multiplier == 0.25
         assert model.shortterm_score_error_multiplier == 30.0
+        # Influence version >= 104: the lead channel is moves left, C++ hardcodes this multiplier too
+        assert model.micromoves_multiplier == 800.0
     else:
         writeln(model.td_score_multiplier)
         writeln(model.scoremean_multiplier)
@@ -209,6 +212,8 @@ def main(args):
             writeln("ACTIVATION_RELU")
         elif isinstance(activation,torch.nn.Mish):
             writeln("ACTIVATION_MISH")
+        elif isinstance(activation,torch.nn.SiLU):
+            writeln("ACTIVATION_SILU")
         elif isinstance(activation,torch.nn.Identity):
             writeln("ACTIVATION_IDENTITY")
         else:
@@ -229,6 +234,61 @@ def main(args):
         (out_channels,) = linearbias.shape
         writeln(out_channels)
         write_weights(linearbias)
+
+    def write_rmsnorm(name,rmsnormmask):
+        writeln(name)
+        writeln(rmsnormmask.c_in)
+        writeln(rmsnormmask.eps)
+        writeln(1 if rmsnormmask.spatial else 0)
+        writeln(0) # channel group size, unused
+        if not rmsnormmask.spatial:
+            assert rmsnormmask.norm.weight.shape == (rmsnormmask.c_in,)
+            write_weights(rmsnormmask.norm.weight)
+        else:
+            assert rmsnormmask.gamma.shape == (rmsnormmask.c_in,)
+            write_weights(rmsnormmask.gamma)
+        assert rmsnormmask.beta.shape == (rmsnormmask.c_in,)
+        write_weights(rmsnormmask.beta)
+
+    def write_transformer_norm(name,rmsnorm):
+        # Inline torch.nn.RMSNorm inside transformer blocks: just a weight vector
+        writeln(name)
+        writeln(rmsnorm.weight.shape[0])
+        writeln(rmsnorm.eps)
+        write_weights(rmsnorm.weight)
+
+    def write_transformer_attention_block(name,block):
+        writeln("transformer_attention_block")
+        writeln(name)
+        writeln(block.num_heads)
+        writeln(block.num_kv_heads)
+        writeln(block.head_dim) # query/key head dim
+        writeln(block.head_dim) # value head dim
+        writeln(1) # use rope
+        writeln(1) # learnable rope
+        write_transformer_norm(name+".norm1", block.norm1)
+        write_matmul(name+".q_proj", block.q_proj.weight)
+        write_matmul(name+".k_proj", block.k_proj.weight)
+        write_matmul(name+".v_proj", block.v_proj.weight)
+        write_matmul(name+".out_proj", block.out_proj.weight)
+        # rope_freqs: (num_kv_heads, head_dim//2, 2), (omega_x, omega_y) with x = column, y = row
+        writeln(name+".rope_freqs")
+        freqs = block.rope_freqs.detach()
+        writeln(freqs.shape[0])
+        writeln(freqs.shape[1])
+        writeln(freqs.shape[2])
+        write_weights(freqs)
+
+    def write_transformer_ffn_block(name,block):
+        writeln("transformer_ffn_block")
+        writeln(name)
+        writeln(block.c_main)
+        writeln(block.ffn_dim)
+        writeln(1) # SwiGLU
+        write_transformer_norm(name+".norm", block.norm)
+        write_matmul(name+".ffn_linear1", block.ffn_linear1.weight)
+        write_matmul(name+".ffn_linear_gate", block.ffn_linear_gate.weight)
+        write_matmul(name+".ffn_linear2", block.ffn_linear2.weight)
 
     def write_normactconv(name,normactconv):
         if normactconv.c_gpool is None:
@@ -284,8 +344,21 @@ def main(args):
             for i,subblock in enumerate(block.blockstack):
                 write_block(name+".blockstack."+str(i),subblock)
             write_normactconv(name+".normactconvq", block.normactconvq)
+        elif isinstance(block,TransformerAttentionBlock):
+            write_transformer_attention_block(name, block)
+        elif isinstance(block,TransformerFFNBlock):
+            write_transformer_ffn_block(name, block)
+        elif isinstance(block,NestedBottleneckTransformerBlock):
+            writeln("nested_bottleneck_block")
+            writeln(name)
+            writeln(2 * block.internal_length)
+            assert len(block.blockstack) == 2 * block.internal_length
+            write_normactconv(name+".normactconvp", block.normactconvp)
+            for i,subblock in enumerate(block.blockstack):
+                write_block(name+".blockstack."+str(i), subblock)
+            write_normactconv(name+".normactconvq", block.normactconvq)
         else:
-            assert False, "This kind of block is not supported for export right now"
+            assert False, f"This kind of block is not supported for export right now: {type(block)}"
 
     def write_trunk(name,model):
         writeln("trunk")
@@ -303,6 +376,12 @@ def main(args):
             writeln(0)
             writeln(0)
             writeln(0)
+        uses_rmsnorm_trunk_tip = isinstance(model.norm_trunkfinal, RMSNormMask)
+        if version >= 104 and version <= 199:
+            # Trunk tip norm kind: 0 = batchnorm-like, 1 = RMSNorm
+            writeln(1 if uses_rmsnorm_trunk_tip else 0)
+        else:
+            assert not uses_rmsnorm_trunk_tip, "RMSNorm trunk tip needs model version >= 104"
 
         write_conv("model.conv_spatial", model.conv_spatial)
         write_matmul("model.linear_global", model.linear_global.weight)
@@ -310,7 +389,9 @@ def main(args):
 
         for i,block in enumerate(model.blocks):
             write_block("model.blocks."+str(i), block)
-        if model.trunk_normless:
+        if uses_rmsnorm_trunk_tip:
+            write_rmsnorm("model.norm_trunkfinal", model.norm_trunkfinal)
+        elif model.trunk_normless:
             write_biasmask("model.norm_trunkfinal", model.norm_trunkfinal)
         else:
             write_bn("model.norm_trunkfinal", model.norm_trunkfinal)

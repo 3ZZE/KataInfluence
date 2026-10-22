@@ -9,6 +9,7 @@ namespace OpenCLKernels {
   extern std::string actIdenDefine;
   extern std::string actReluDefine;
   extern std::string actMishDefine;
+  extern std::string actSiluDefine;
 
   extern std::string common;
   extern std::string conv2dNCHW;
@@ -25,6 +26,11 @@ namespace OpenCLKernels {
   extern std::string addChannelBiasesNCHW;
   extern std::string addCBiasesNCAct;
   extern std::string extractChannel0NCHW;
+  extern std::string transformerRMSNorm;
+  extern std::string transformerSpatialRMSNorm;
+  extern std::string transformerApplyRoPE;
+  extern std::string transformerAttention;
+  extern std::string transformerSwiGLU;
 
   extern std::string xgemmDirect;
   extern std::string xgemm;

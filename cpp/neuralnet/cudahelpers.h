@@ -56,4 +56,64 @@ void customCudaApplyCScaleBiasNHWC(const float* in, float* out, const float* sca
 void customCudaApplyCScaleBiasNHWC(const half* in, half* out, const half* scale, const half* biases, const half* mask, int n, int xy, int c, int activation);
 
 
+//Transformer kernels, NHWC only ([n, xy, c] activations), computing in fp32 whatever the storage type.
+
+//Spatial RMSNorm: one RMS per sample over all channels and on-board positions. sumSqBuf is float scratch [n].
+void customCudaSpatialRMSNormNHWC(
+  const float* in, float* out, const float* gamma, const float* beta, const float* mask, const float* maskSum,
+  int nSize, int xySize, int cSize, float epsilon, int activation, float* sumSqBuf);
+void customCudaSpatialRMSNormNHWC(
+  const half* in, half* out, const half* gamma, const half* beta, const half* mask, const float* maskSum,
+  int nSize, int xySize, int cSize, float epsilon, int activation, float* sumSqBuf);
+
+//Learnable 2D RoPE in place on [n, xy, numBufHeads*headDim], with freqs (numKVHeads, headDim/2, 2) as float.
+//Position xy is x = xy % nnXLen (column), y = xy / nnXLen (row). Fallback for the fused Q+K version below.
+void customCudaApplyRoPENHWC(
+  float* buf, const float* freqs, int batchSize, int seqLen, int numBufHeads, int numKVHeads, int headDim, int nnXLen);
+void customCudaApplyRoPENHWC(
+  half* buf, const float* freqs, int batchSize, int seqLen, int numBufHeads, int numKVHeads, int headDim, int nnXLen);
+
+//Attention, Q [n, xy, numHeads*qHeadDim], K [n, xy, numKVHeads*qHeadDim], V [n, xy, numKVHeads*vHeadDim],
+//output [n, xy, numHeads*vHeadDim], mask [n, xy]. Off-board keys are skipped, off-board queries give 0.
+//Scalar fallback for customCudaFlashAttentionMma below.
+void customCudaAttentionNHWC(
+  const float* Q, const float* K, const float* V, const float* mask, float* output,
+  int batchSize, int seqLen, int numHeads, int numKVHeads, int qHeadDim, int vHeadDim);
+void customCudaAttentionNHWC(
+  const half* Q, const half* K, const half* V, const half* mask, half* output,
+  int batchSize, int seqLen, int numHeads, int numKVHeads, int qHeadDim, int vHeadDim);
+
+//From upstream KataGo (cudaandrocmhelpers.inc), see cudahelpers.cu. Pass stream 0.
+
+//RMSNorm per position over channels: out = act(in * rms * gamma + beta) * mask. gamma/beta [c], mask [n, xy] or NULL.
+void customCudaRMSNormGammaBetaNHWC(
+  const float* in, float* out, const float* gamma, const float* beta, const float* mask,
+  int nSize, int xySize, int cSize, float epsilon, int activation, cudaStream_t stream);
+void customCudaRMSNormGammaBetaNHWC(
+  const half* in, half* out, const half* gamma, const half* beta, const half* mask,
+  int nSize, int xySize, int cSize, float epsilon, int activation, cudaStream_t stream);
+
+//Learnable 2D RoPE in place on Q and K in one launch. qStride/kvStride are the per-token row strides in elements.
+//Requires numHeads % numKVHeads == 0.
+void customCudaApplyRoPEQKLearnableRecompute(
+  float* qBuf, float* kBuf, const float* freqs,
+  int batchSize, int seqLen, int numHeads, int numKVHeads, int qHeadDim, int qStride, int kvStride, int numPairs, int nnXLen, cudaStream_t stream);
+void customCudaApplyRoPEQKLearnableRecompute(
+  half* qBuf, half* kBuf, const float* freqs,
+  int batchSize, int seqLen, int numHeads, int numKVHeads, int qHeadDim, int qStride, int kvStride, int numPairs, int nnXLen, cudaStream_t stream);
+
+//Tensor-core flash attention (FP16, head dims 32/64, sm_75+), same layout and semantics as customCudaAttentionNHWC.
+//Returns false if the shape, strides or alignment are unsupported, then the caller falls back.
+//customCudaFlashAttentionMmaSupported() must be checked once per device first.
+bool customCudaFlashAttentionMma(
+  const half* Q, const half* K, const half* V, const half* mask, half* output,
+  int batchSize, int seqLen, int numHeads, int numKVHeads, int qHeadDim, int vHeadDim,
+  int qStride, int kvStride, cudaStream_t stream);
+bool customCudaFlashAttentionMmaSupportsShape(int numHeads, int numKVHeads, int qHeadDim, int vHeadDim);
+bool customCudaFlashAttentionMmaSupported();
+
+//SwiGLU: out = silu(a) * b, out may alias a
+void customCudaSwiGLU(const float* a, const float* b, float* out, int size, cudaStream_t stream);
+void customCudaSwiGLU(const half* a, const half* b, half* out, int size, cudaStream_t stream);
+
 #endif  // NEURALNET_CUDAHELPERS_H_

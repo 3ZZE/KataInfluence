@@ -61,6 +61,7 @@ NNOutput::NNOutput(const NNOutput& other) {
   movesLeft = other.movesLeft;
   varTimeLeft = other.varTimeLeft;
   shorttermWinlossError = other.shorttermWinlossError;
+  microMovesLeft = other.microMovesLeft;
 
   nnXLen = other.nnXLen;
   nnYLen = other.nnYLen;
@@ -90,6 +91,7 @@ NNOutput::NNOutput(const vector<shared_ptr<NNOutput>>& others) {
   movesLeft = 0.0f;
   varTimeLeft = 0.0f;
   shorttermWinlossError = 0.0f;
+  microMovesLeft = 0.0f;
   for(int i = 0; i < len; i++) {
     const NNOutput& other = *(others[i]);
     whiteWinProb += other.whiteWinProb;
@@ -98,6 +100,7 @@ NNOutput::NNOutput(const vector<shared_ptr<NNOutput>>& others) {
     movesLeft += other.movesLeft;
     varTimeLeft += other.varTimeLeft;
     shorttermWinlossError += other.shorttermWinlossError;
+    microMovesLeft += other.microMovesLeft;
   }
   whiteWinProb /= floatLen;
   whiteLossProb /= floatLen;
@@ -105,6 +108,7 @@ NNOutput::NNOutput(const vector<shared_ptr<NNOutput>>& others) {
   movesLeft /= floatLen;
   varTimeLeft /= floatLen;
   shorttermWinlossError /= floatLen;
+  microMovesLeft /= floatLen;
 
   nnXLen = others[0]->nnXLen;
   nnYLen = others[0]->nnYLen;
@@ -149,6 +153,7 @@ NNOutput& NNOutput::operator=(const NNOutput& other) {
   movesLeft = other.movesLeft;
   varTimeLeft = other.varTimeLeft;
   shorttermWinlossError = other.shorttermWinlossError;
+  microMovesLeft = other.microMovesLeft;
 
   nnXLen = other.nnXLen;
   nnYLen = other.nnYLen;
@@ -178,6 +183,7 @@ void NNOutput::debugPrint(ostream& out, const Board& board) {
   out << "Loss " << Global::strprintf("%.2fc", whiteLossProb * 100) << endl;
   out << "NoResult " << Global::strprintf("%.2fc", whiteNoResultProb * 100) << endl;
   out << "MovesLeft " << Global::strprintf("%.1f", movesLeft) << endl;
+  out << "MicroMovesLeft " << Global::strprintf("%.1f", microMovesLeft) << endl;
   out << "VarTimeLeft " << Global::strprintf("%.1f", varTimeLeft) << endl;
   out << "STWinlossError " << Global::strprintf("%.3f", shorttermWinlossError) << endl;
 
@@ -572,18 +578,29 @@ Hash128 NNInputs::getHash(
 //  12    turns left / move limit
 //  13    exp(-turns left / 20)
 //  rest  0
+//
+// INPUTSVERSION 103 (model version 104): same spatial planes and globals 0-13, plus
+//  14-29 reinforce stage only: one-hot bucket of the points left, by upper bounds
+//        1,2,3,4,5,6,7,8,10,12,14,16,24,32,64,inf (exact counts up to 8, then ranges)
+//  30    value ratio: own value / opp value in the attack stages, and own value at the end of the turn
+//        (own value + points left) / opp value in the reinforce stage. Opp value is floored at 1, capped at 32.
+//  31    attack stages only: the player has a legal non-pass move
+//  32-47 rule flags, see fillRuleFeatures (32 = forbidPassUnlessNoOtherMove, the rest reserved)
+//  48-63 0 (63 must stay 0, the python scorebelief head reads the last global)
 
-void NNInputs::fillRowV102(
+//Shared by V102 and V103. Returns whether any non-pass move is legal for the player to move.
+static bool fillRowInfluenceBase(
   const Board& board,
   const BoardHistory& hist,
   Player nextPlayer,
-  const MiscNNInputParams& nnInputParams,
   int nnXLen,
   int nnYLen,
   bool useNHWC,
   float* rowBin,
   float* rowGlobal) {
-  (void)nnInputParams;
+  using namespace NNInputs;
+  static_assert(NUM_FEATURES_SPATIAL_V102 == NUM_FEATURES_SPATIAL_V103, "");
+  static_assert(NUM_FEATURES_GLOBAL_V102 == NUM_FEATURES_GLOBAL_V103, "");
   assert(nnXLen <= NNPos::MAX_BOARD_LEN);
   assert(nnYLen <= NNPos::MAX_BOARD_LEN);
   assert(board.x_size <= nnXLen);
@@ -606,6 +623,7 @@ void NNInputs::fillRowV102(
     posStride = 1;
   }
 
+  bool anyLegalNonPass = false;
   int numCells = 0;
   for(int y = 0; y < ySize; y++) {
     for(int x = 0; x < xSize; x++) {
@@ -635,8 +653,10 @@ void NNInputs::fillRowV102(
       }
       if(loc == board.selectedSrc)
         p[28 * featureStride] = 1.0f;
-      if(isPlaToMove && board.isLegal(loc, pla))
+      if(isPlaToMove && board.isLegal(loc, pla)) {
         p[29 * featureStride] = 1.0f;
+        anyLegalNonPass = true;
+      }
     }
   }
   if(numCells <= 0)
@@ -660,6 +680,69 @@ void NNInputs::fillRowV102(
     rowGlobal[12] = (float)turnsLeft / hist.rules.maxMoves;
     rowGlobal[13] = (float)exp(-turnsLeft / 20.0);
   }
+  return anyLegalNonPass;
+}
+
+void NNInputs::fillRowV102(
+  const Board& board,
+  const BoardHistory& hist,
+  Player nextPlayer,
+  const MiscNNInputParams& nnInputParams,
+  int nnXLen,
+  int nnYLen,
+  bool useNHWC,
+  float* rowBin,
+  float* rowGlobal) {
+  (void)nnInputParams;
+  fillRowInfluenceBase(board, hist, nextPlayer, nnXLen, nnYLen, useNHWC, rowBin, rowGlobal);
+}
+
+int NNInputs::getPointsLeftBucket(int pointsLeft) {
+  static const int upperBounds[V103_NUM_POINTS_LEFT_BUCKETS - 1] = {1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 24, 32, 64};
+  assert(pointsLeft >= 1);
+  for(int i = 0; i < V103_NUM_POINTS_LEFT_BUCKETS - 1; i++) {
+    if(pointsLeft <= upperBounds[i])
+      return i;
+  }
+  return V103_NUM_POINTS_LEFT_BUCKETS - 1;
+}
+
+void NNInputs::fillRuleFeatures(const Rules& rules, float* rowGlobal) {
+  float* f = rowGlobal + RULE_FEATURES_START;
+  std::fill(f, f + NUM_RULE_FEATURES, 0.0f);
+  f[0] = rules.forbidPassUnlessNoOtherMove ? 1.0f : 0.0f;
+  //f[1] .. f[NUM_RULE_FEATURES-1]: reserved for future rules
+}
+
+void NNInputs::fillRowV103(
+  const Board& board,
+  const BoardHistory& hist,
+  Player nextPlayer,
+  const MiscNNInputParams& nnInputParams,
+  int nnXLen,
+  int nnYLen,
+  bool useNHWC,
+  float* rowBin,
+  float* rowGlobal) {
+  (void)nnInputParams;
+  bool anyLegalNonPass = fillRowInfluenceBase(board, hist, nextPlayer, nnXLen, nnYLen, useNHWC, rowBin, rowGlobal);
+
+  Player pla = nextPlayer;
+  Player opp = getOpp(pla);
+  bool isReinforce = board.stage == Board::STAGE_REINFORCE;
+  if(isReinforce && board.reinforceLeft >= 1)
+    rowGlobal[V103_POINTS_LEFT_START + getPointsLeftBucket(board.reinforceLeft)] = 1.0f;
+
+  //In the reinforce stage the net only sees positions with fewer points than the room left (otherwise
+  //they are applied automatically), so own value + points left is exactly the value at the end of the turn.
+  int ownValue = board.getValue(pla) + (isReinforce ? board.reinforceLeft : 0);
+  int oppValue = std::max(1, board.getValue(opp));
+  rowGlobal[V103_VALUE_RATIO] = std::min(V103_MAX_VALUE_RATIO, (float)ownValue / oppValue);
+
+  if(!isReinforce && anyLegalNonPass)
+    rowGlobal[V103_CAN_ATTACK] = 1.0f;
+
+  fillRuleFeatures(hist.rules, rowGlobal);
 }
 
 void NNInputs::fillRowV7(
@@ -668,7 +751,7 @@ void NNInputs::fillRowV7(
 ) {
   (void)board; (void)boardHistory; (void)nextPlayer; (void)nnInputParams;
   (void)nnXLen; (void)nnYLen; (void)useNHWC; (void)rowBin; (void)rowGlobal;
-  throw StringError("Influence only supports inputs version 102 (model version 103)");
+  throw StringError("Influence only supports inputs versions 102 and 103 (model versions 103 and 104)");
 }
 
 void NNInputs::fillRowV101(
@@ -677,5 +760,5 @@ void NNInputs::fillRowV101(
 ) {
   (void)board; (void)boardHistory; (void)nextPlayer; (void)nnInputParams;
   (void)nnXLen; (void)nnYLen; (void)useNHWC; (void)rowBin; (void)rowGlobal;
-  throw StringError("Influence only supports inputs version 102 (model version 103)");
+  throw StringError("Influence only supports inputs versions 102 and 103 (model versions 103 and 104)");
 }

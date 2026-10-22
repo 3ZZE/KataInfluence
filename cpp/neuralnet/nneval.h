@@ -115,6 +115,7 @@ class NNEvaluator {
   int getNumGpus() const;
   int getNumServerThreads() const;
   std::set<int> getGpuIdxs() const;
+  int getModelVersion() const;
   int getNNXLen() const;
   int getNNYLen() const;
   enabled_t getUsingFP16Mode() const;

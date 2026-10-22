@@ -16,6 +16,10 @@
 //9 = V7 features, shortterm value error
 //10 = V7 features, shortterm value error done more properly
 //11 = V7 features, supports mish activations by desc actually reading the activations
+//Influence:
+//103 = V102 features
+//104 = V103 features, score-value channel 2 (formerly lead) predicts micro-moves left,
+//      trunk header carries the trunk norm kind (batchnorm or RMSNorm)
 
 static void fail(int modelVersion) {
   throw StringError("NNModelVersion: Model version not currently implemented or supported: " + Global::intToString(modelVersion));
@@ -23,8 +27,8 @@ static void fail(int modelVersion) {
 
 static_assert(NNModelVersion::oldestModelVersionImplemented == 8, "");
 static_assert(NNModelVersion::oldestInputsVersionImplemented == 7, "");
-static_assert(NNModelVersion::latestModelVersionImplemented == 103, "");
-static_assert(NNModelVersion::latestInputsVersionImplemented == 102, "");
+static_assert(NNModelVersion::latestModelVersionImplemented == 104, "");
+static_assert(NNModelVersion::latestInputsVersionImplemented == 103, "");
 
 int NNModelVersion::getInputsVersion(int modelVersion) {
   if(modelVersion >= 8 && modelVersion <= 11)
@@ -33,6 +37,8 @@ int NNModelVersion::getInputsVersion(int modelVersion) {
     return 101;
   else if(modelVersion == 103)
     return 102;
+  else if(modelVersion == 104)
+    return 103;
 
   fail(modelVersion);
   return -1;
@@ -45,6 +51,8 @@ int NNModelVersion::getNumSpatialFeatures(int modelVersion) {
     return NNInputs::NUM_FEATURES_SPATIAL_V101;
   else if(modelVersion == 103)
     return NNInputs::NUM_FEATURES_SPATIAL_V102;
+  else if(modelVersion == 104)
+    return NNInputs::NUM_FEATURES_SPATIAL_V103;
 
   fail(modelVersion);
   return -1;
@@ -57,6 +65,8 @@ int NNModelVersion::getNumGlobalFeatures(int modelVersion) {
     return NNInputs::NUM_FEATURES_GLOBAL_V101;
   else if(modelVersion == 103)
     return NNInputs::NUM_FEATURES_GLOBAL_V102;
+  else if(modelVersion == 104)
+    return NNInputs::NUM_FEATURES_GLOBAL_V103;
 
   fail(modelVersion);
   return -1;

@@ -59,6 +59,21 @@ namespace NNInputs {
   const int NUM_FEATURES_SPATIAL_V102 = 32;
   const int NUM_FEATURES_GLOBAL_V102 = 64;
 
+  //2026 Influence: V102 plus reinforce points-left buckets, value ratio, attack flag and rule flags (same counts)
+  const int NUM_FEATURES_SPATIAL_V103 = 32;
+  const int NUM_FEATURES_GLOBAL_V103 = 64;
+
+  //V103 global slots, see the layout comment above fillRowV102 in nninputs.cpp
+  const int V103_POINTS_LEFT_START = 14;
+  const int V103_NUM_POINTS_LEFT_BUCKETS = 16;
+  const int V103_VALUE_RATIO = 30;
+  const int V103_CAN_ATTACK = 31;
+  const float V103_MAX_VALUE_RATIO = 32.0f;
+  //Rule flags. To add a rule: add the field to Rules (with hash, parse, toString and json),
+  //then set the next free slot in fillRuleFeatures. Existing nets keep working, the slot was always 0 for them.
+  const int RULE_FEATURES_START = 32;
+  const int NUM_RULE_FEATURES = 16;
+
   Hash128 getHash(
     const Board& board, const BoardHistory& boardHistory, Player nextPlayer,
     const MiscNNInputParams& nnInputParams
@@ -79,6 +94,16 @@ namespace NNInputs {
     const Board& board, const BoardHistory& boardHistory, Player nextPlayer,
     const MiscNNInputParams& nnInputParams, int nnXLen, int nnYLen, bool useNHWC, float* rowBin, float* rowGlobal
   );
+
+  void fillRowV103(
+    const Board& board, const BoardHistory& boardHistory, Player nextPlayer,
+    const MiscNNInputParams& nnInputParams, int nnXLen, int nnYLen, bool useNHWC, float* rowBin, float* rowGlobal
+  );
+
+  //Index in [0, V103_NUM_POINTS_LEFT_BUCKETS) of the points-left one-hot for pointsLeft >= 1
+  int getPointsLeftBucket(int pointsLeft);
+  //Fills rowGlobal[RULE_FEATURES_START, RULE_FEATURES_START + NUM_RULE_FEATURES)
+  void fillRuleFeatures(const Rules& rules, float* rowGlobal);
 }
 
 struct NNOutput {
@@ -161,6 +186,9 @@ struct NNOutput {
   //A metric indicating the "typical" error in the winloss value or the score that the net expects, relative to the
   //short-term future MCTS value.
   float shorttermWinlossError;
+  //Predicted number of moves (decisions, not counting forced reinforcement) until the game ends,
+  //only when modelVersion >= 104, otherwise 0. Not player-relative.
+  float microMovesLeft;
 
   //Indexed by pos rather than loc
   //Values in here will be set to negative for illegal moves, including superko

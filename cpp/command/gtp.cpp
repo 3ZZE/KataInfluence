@@ -912,6 +912,7 @@ struct GTPEngine {
         out << "whiteLoss " << Global::strprintf("%.6f",nnOutput->whiteLossProb) << endl;
         out << "noResult " << Global::strprintf("%.6f",nnOutput->whiteNoResultProb) << endl;
         out << "movesLeft " << Global::strprintf("%.3f",nnOutput->movesLeft) << endl;
+        out << "microMovesLeft " << Global::strprintf("%.3f",nnOutput->microMovesLeft) << endl;
         out << "varTimeLeft " << Global::strprintf("%.3f",nnOutput->varTimeLeft) << endl;
         out << "shorttermWinlossError " << Global::strprintf("%.3f",nnOutput->shorttermWinlossError) << endl;
 

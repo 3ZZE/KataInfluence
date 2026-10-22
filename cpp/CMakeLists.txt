@@ -239,6 +239,7 @@ add_executable(katago
   command/gatekeeper.cpp
   command/genbook.cpp
   command/gputest.cpp
+  command/dumpnnparity.cpp
   command/gtp.cpp
   command/match.cpp
   command/matchauto.cpp

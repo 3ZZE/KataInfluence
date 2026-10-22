@@ -10,6 +10,7 @@ string OpenCLKernels::fp16ComputeDefine = " -DPRECISION=16";
 string OpenCLKernels::actIdenDefine = " -DACTIVATION=0";
 string OpenCLKernels::actReluDefine = " -DACTIVATION=1";
 string OpenCLKernels::actMishDefine = " -DACTIVATION=2";
+string OpenCLKernels::actSiluDefine = " -DACTIVATION=3";
 
 string OpenCLKernels::common = R"%%(
 #ifndef PRECISION
@@ -459,6 +460,9 @@ __kernel void bnActTransform(
 #elif ACTIVATION == 2
         float a = INPUT(nic,xy) * LOAD(scale,ic) + LOAD(bias,ic);
         value = floatToReal(a * tanh(a < LOG1PEXPTHRESHOLD ? log1p(exp(a)) : a)) * LOAD(mask, n * xySize + xy);
+#elif ACTIVATION == 3
+        float a = INPUT(nic,xy) * LOAD(scale,ic) + LOAD(bias,ic);
+        value = floatToReal(a / (1.0f + exp(-a))) * LOAD(mask, n * xySize + xy);
 #endif
       }
       WTILE(subY,subX) = value;
@@ -762,6 +766,9 @@ __kernel void scaleBiasMaskActNCHW(
 #elif ACTIVATION == 2
       float a = LOAD(input,idx) * LOAD(scale,c) + LOAD(bias,c);
       real result = floatToReal(a * tanh(a < LOG1PEXPTHRESHOLD ? log1p(exp(a)) : a)) * LOAD(mask,n * xySize + xy);
+#elif ACTIVATION == 3
+      float a = LOAD(input,idx) * LOAD(scale,c) + LOAD(bias,c);
+      real result = floatToReal(a / (1.0f + exp(-a))) * LOAD(mask,n * xySize + xy);
 #endif
       STORE(output,idx,result);
     }
@@ -1015,6 +1022,9 @@ __kernel void addCBiasesNCAct(
 #elif ACTIVATION == 2
     float a = accum[n * cSize + c] + biases[c];
     accum[n * cSize + c] = floatToReal(a * tanh(a < LOG1PEXPTHRESHOLD ? log1p(exp(a)) : a));
+#elif ACTIVATION == 3
+    float a = accum[n * cSize + c] + biases[c];
+    accum[n * cSize + c] = a / (1.0f + exp(-a));
 #endif
   }
 }
@@ -1034,6 +1044,252 @@ __kernel void extractChannel0NCHW(__global realstore* in, __global realstore* ou
 )%%";
 
 //.
+//Transformer kernels, adapted from upstream KataGo v1.17.0 to the unpadded NCHW layout (xySize = nnXLen*nnYLen).
+
+//RMSNorm per position over channels: output = (input * rms * weight + beta) * mask
+//Defines: WG_XY_SIZE, WG_C_SIZE (power of two) - local size is WG_XY_SIZE * WG_C_SIZE
+string OpenCLKernels::transformerRMSNorm = OpenCLKernels::common + R"%%(
+__kernel void transformerRMSNorm(
+  __global realstore* input,   // N, C, H, W (NCHW)
+  __global realstore* output,  // N, C, H, W (NCHW)
+  __global float* weight,      // C
+  __global float* beta,        // C
+  __global realstore* mask,    // N, H, W
+  int nSize,
+  int cSize,
+  int xySize,
+  float epsilon
+) {
+  const int lid = get_local_id(0);
+  const int lid_xy = lid % WG_XY_SIZE;
+  const int lid_c = lid / WG_XY_SIZE;
+  const int xy = get_group_id(0) * WG_XY_SIZE + lid_xy;
+  const int n = get_group_id(1);
+  if(n >= nSize) return;
+
+  float maskVal = (xy < xySize) ? LOAD(mask, n * xySize + xy) : 0.0f;
+
+  float acc = 0.0f;
+  if(xy < xySize) {
+    for(int c = lid_c; c < cSize; c += WG_C_SIZE) {
+      float val = LOAD(input, (n * cSize + c) * xySize + xy);
+      acc += val * val;
+    }
+  }
+
+  __local float partials[WG_XY_SIZE * WG_C_SIZE];
+  partials[lid_xy * WG_C_SIZE + lid_c] = acc;
+  for(int span = WG_C_SIZE / 2; span > 0; span /= 2) {
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if(lid_c < span)
+      partials[lid_xy * WG_C_SIZE + lid_c] += partials[lid_xy * WG_C_SIZE + lid_c + span];
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  float rms = rsqrt(partials[lid_xy * WG_C_SIZE] / (float)cSize + epsilon);
+
+  if(xy < xySize) {
+    for(int c = lid_c; c < cSize; c += WG_C_SIZE) {
+      float val = LOAD(input, (n * cSize + c) * xySize + xy);
+      float result = (val * rms * weight[c] + beta[c]) * maskVal;
+      STORE(output, (n * cSize + c) * xySize + xy, floatToReal(result));
+    }
+  }
+}
+)%%";
+
+//Spatial RMSNorm (trunk tip): one RMS per sample over all channels and on-board positions.
+//transformerSpatialRMSNormSumSq: one workgroup of TILE_SIZE (power of two) per sample writes the masked sum of squares.
+//transformerSpatialRMSNormApply: output = (input * rms * gamma + beta) * mask, 2D global (xy, c), loops over n.
+string OpenCLKernels::transformerSpatialRMSNorm = OpenCLKernels::common + R"%%(
+__kernel void transformerSpatialRMSNormSumSq(
+  __global realstore* input,   // N, C, xySize (NCHW)
+  __global realstore* mask,    // N, xySize
+  __global float* sumSqOut,    // N
+  int nSize,
+  int cSize,
+  int xySize
+) {
+  const int lid = get_local_id(0);
+  const int n = get_group_id(1);
+  if(n >= nSize) return;
+
+  const int totalElems = cSize * xySize;
+  float acc = 0.0f;
+  for(int idx = lid; idx < totalElems; idx += TILE_SIZE) {
+    int c = idx / xySize;
+    int xy = idx % xySize;
+    float val = LOAD(input, (n * cSize + c) * xySize + xy) * LOAD(mask, n * xySize + xy);
+    acc += val * val;
+  }
+
+  __local float partials[TILE_SIZE];
+  partials[lid] = acc;
+  for(int span = TILE_SIZE / 2; span > 0; span /= 2) {
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if(lid < span)
+      partials[lid] += partials[lid + span];
+  }
+  if(lid == 0)
+    sumSqOut[n] = partials[0];
+}
+
+__kernel void transformerSpatialRMSNormApply(
+  __global realstore* input,   // N, C, xySize (NCHW)
+  __global realstore* output,  // N, C, xySize (NCHW)
+  __global float* gamma,       // C
+  __global float* beta,        // C
+  __global realstore* mask,    // N, xySize
+  __global float* maskSum,     // N
+  __global float* sumSq,       // N
+  int nSize,
+  int cSize,
+  int xySize,
+  float epsilon
+) {
+  const int xy = get_global_id(0);
+  const int c = get_global_id(1);
+  if(xy >= xySize || c >= cSize)
+    return;
+  for(int n = 0; n < nSize; n++) {
+    float rms = rsqrt(sumSq[n] / fmax(1.0f, maskSum[n] * (float)cSize) + epsilon);
+    int idx = (n * cSize + c) * xySize + xy;
+    float result = (LOAD(input, idx) * rms * gamma[c] + beta[c]) * LOAD(mask, n * xySize + xy);
+    STORE(output, idx, floatToReal(result));
+  }
+}
+)%%";
+
+//Learnable 2D RoPE on Q or K in place. data is (N, numBufHeads, headDim, xySize), i.e. the NCHW output of the projection.
+//Rotates channel pairs (2p, 2p+1). Tables are (numKVHeads, numPairs, xySize), buffer head h uses kv head h*numKVHeads/numBufHeads.
+string OpenCLKernels::transformerApplyRoPE = OpenCLKernels::common + R"%%(
+__kernel void transformerApplyRoPE(
+  __global realstore* data,
+  __global float* cosTable,
+  __global float* sinTable,
+  int nSize,
+  int numBufHeads,
+  int numKVHeads,
+  int headDim,
+  int xySize,
+  int numPairs
+) {
+  const int xy = get_global_id(0);
+  const int pairIdx = get_global_id(1);
+  const int nh = get_global_id(2);
+  const int n = nh / numBufHeads;
+  const int h = nh % numBufHeads;
+
+  if(n < nSize && pairIdx < numPairs && xy < xySize) {
+    int idx0 = ((n * numBufHeads + h) * headDim + pairIdx * 2) * xySize + xy;
+    int idx1 = idx0 + xySize;
+    float x0 = LOAD(data, idx0);
+    float x1 = LOAD(data, idx1);
+    int kvh = h * numKVHeads / numBufHeads;
+    int tableIdx = (kvh * numPairs + pairIdx) * xySize + xy;
+    float cosVal = cosTable[tableIdx];
+    float sinVal = sinTable[tableIdx];
+    STORE(data, idx0, floatToReal(x0 * cosVal - x1 * sinVal));
+    STORE(data, idx1, floatToReal(x0 * sinVal + x1 * cosVal));
+  }
+}
+)%%";
+
+//Scaled dot product attention, one work-item per query with an online softmax over all on-board keys.
+//Q: (N*numHeads, ATTN_HEAD_DIM, seqLen), K: (N*numKVHeads, ATTN_HEAD_DIM, seqLen), V: (N*numKVHeads, ATTN_V_HEAD_DIM, seqLen),
+//output: (N*numHeads, ATTN_V_HEAD_DIM, seqLen), mask: (N, seqLen). Off-board queries give 0.
+//Defines: ATTN_HEAD_DIM, ATTN_V_HEAD_DIM. Computes in fp32 whatever the storage.
+string OpenCLKernels::transformerAttention = R"%%(
+#ifndef PRECISION_STORAGE
+  #define PRECISION_STORAGE 32
+#endif
+#if PRECISION_STORAGE == 16
+  #pragma OPENCL EXTENSION cl_khr_fp16: enable
+  typedef half realstore;
+  #define LOAD(__buf,__x) vload_half((__x),(__buf))
+  #define STORE(__buf,__x,__y) vstore_half((__y),(__x),(__buf))
+#else
+  typedef float realstore;
+  #define LOAD(__buf,__x) ((__buf)[(__x)])
+  #define STORE(__buf,__x,__y) ((__buf)[(__x)] = (__y))
+#endif
+
+__kernel void transformerAttention(
+  __global realstore* Q,
+  __global realstore* K,
+  __global realstore* V,
+  __global realstore* output,
+  __global realstore* mask,
+  int seqLen,
+  int numHeads,
+  int numKVHeads,
+  float scale
+) {
+  const int qPos = get_global_id(0);
+  const int bh = get_global_id(1);  // n * numHeads + h
+
+  const int n = bh / numHeads;
+  const int h = bh % numHeads;
+  const int kvh = h / (numHeads / numKVHeads);
+  const int kvBase = n * numKVHeads + kvh;
+
+  if(qPos >= seqLen)
+    return;
+
+  float qMask = LOAD(mask, n * seqLen + qPos);
+  if(qMask == 0.0f) {
+    for(int d = 0; d < ATTN_V_HEAD_DIM; d++)
+      STORE(output, (bh * ATTN_V_HEAD_DIM + d) * seqLen + qPos, 0.0f);
+    return;
+  }
+
+  float q[ATTN_HEAD_DIM];
+  for(int d = 0; d < ATTN_HEAD_DIM; d++)
+    q[d] = LOAD(Q, (bh * ATTN_HEAD_DIM + d) * seqLen + qPos) * scale;
+
+  float runningMax = -1e30f;
+  float runningSum = 0.0f;
+  float acc[ATTN_V_HEAD_DIM];
+  for(int d = 0; d < ATTN_V_HEAD_DIM; d++)
+    acc[d] = 0.0f;
+
+  for(int kPos = 0; kPos < seqLen; kPos++) {
+    if(LOAD(mask, n * seqLen + kPos) == 0.0f)
+      continue;
+    float dot = 0.0f;
+    for(int d = 0; d < ATTN_HEAD_DIM; d++)
+      dot += q[d] * LOAD(K, (kvBase * ATTN_HEAD_DIM + d) * seqLen + kPos);
+
+    float newMax = fmax(runningMax, dot);
+    float expOldMax = exp(runningMax - newMax);
+    float expCur = exp(dot - newMax);
+    runningSum = runningSum * expOldMax + expCur;
+    runningMax = newMax;
+    for(int d = 0; d < ATTN_V_HEAD_DIM; d++)
+      acc[d] = acc[d] * expOldMax + expCur * LOAD(V, (kvBase * ATTN_V_HEAD_DIM + d) * seqLen + kPos);
+  }
+
+  float invSum = (runningSum > 0.0f) ? (1.0f / runningSum) : 0.0f;
+  for(int d = 0; d < ATTN_V_HEAD_DIM; d++)
+    STORE(output, (bh * ATTN_V_HEAD_DIM + d) * seqLen + qPos, acc[d] * invSum);
+}
+)%%";
+
+//SwiGLU in place: mainProj = silu(mainProj) * gateProj, flat over all elements
+string OpenCLKernels::transformerSwiGLU = OpenCLKernels::common + R"%%(
+__kernel void transformerSwiGLU(
+  __global realstore* mainProj,
+  __global realstore* gateProj,
+  int size
+) {
+  const int s = get_global_id(0);
+  if(s < size) {
+    float a = LOAD(mainProj, s);
+    float b = LOAD(gateProj, s);
+    STORE(mainProj, s, floatToReal(a / (1.0f + exp(-a)) * b));
+  }
+}
+)%%";
+
 string OpenCLKernels::xgemmDirect =
 #include "../external/clblast/common.opencl"
 #include "../external/clblast/xgemm_direct_part1.opencl"

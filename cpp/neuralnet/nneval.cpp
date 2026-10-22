@@ -247,6 +247,9 @@ std::set<int> NNEvaluator::getGpuIdxs() const {
   return gpuIdxs;
 }
 
+int NNEvaluator::getModelVersion() const {
+  return modelVersion;
+}
 int NNEvaluator::getNNXLen() const {
   return nnXLen;
 }
@@ -489,6 +492,7 @@ void NNEvaluator::serve(
         double whiteNoResultProb = 0.0 + rand.nextGaussian() * 0.20;
         double varTimeLeft = 0.5 * boardXSize * boardYSize;
         resultBuf->result->movesLeft = 0.0f;
+        resultBuf->result->microMovesLeft = 0.0f;
         resultBuf->result->whiteWinProb = (float)whiteWinProb;
         resultBuf->result->whiteLossProb = (float)whiteLossProb;
         resultBuf->result->whiteNoResultProb = (float)whiteNoResultProb;
@@ -645,13 +649,15 @@ void NNEvaluator::evaluate(
     }
 
 
-    static_assert(NNModelVersion::latestInputsVersionImplemented == 102, "");
+    static_assert(NNModelVersion::latestInputsVersionImplemented == 103, "");
     if(inputsVersion == 7)
       NNInputs::fillRowV7(board, history, nextPlayer, nnInputParams, nnXLen, nnYLen, inputsUseNHWC, buf.rowSpatial, buf.rowGlobal);
     else if(inputsVersion == 101)
       NNInputs::fillRowV101(board, history, nextPlayer, nnInputParams, nnXLen, nnYLen, inputsUseNHWC, buf.rowSpatial, buf.rowGlobal);
     else if(inputsVersion == 102)
       NNInputs::fillRowV102(board, history, nextPlayer, nnInputParams, nnXLen, nnYLen, inputsUseNHWC, buf.rowSpatial, buf.rowGlobal);
+    else if(inputsVersion == 103)
+      NNInputs::fillRowV103(board, history, nextPlayer, nnInputParams, nnXLen, nnYLen, inputsUseNHWC, buf.rowSpatial, buf.rowGlobal);
     else
       ASSERT_UNREACHABLE;
   }
@@ -769,12 +775,13 @@ void NNEvaluator::evaluate(
 
     //Fix up the value as well. Note that the neural net gives us back the value from the perspective
     //of the player so we need to negate that to make it the white value.
-    static_assert(NNModelVersion::latestModelVersionImplemented == 103, "");
-    if(modelVersion >= 4 && modelVersion <= 103) {
+    static_assert(NNModelVersion::latestModelVersionImplemented == 104, "");
+    if(modelVersion >= 4 && modelVersion <= 104) {
       double winProb;
       double lossProb;
       double noResultProb;
       double movesLeft;
+      double microMovesLeft;
       double varTimeLeft;
       double shorttermWinlossError;
       {
@@ -782,6 +789,7 @@ void NNEvaluator::evaluate(
         double lossLogits = buf.result->whiteLossProb;
         double noResultLogits = buf.result->whiteNoResultProb;
         double movesLeftPreScaled = buf.result->movesLeft;
+        double microMovesLeftPreScaled = modelVersion >= 104 ? buf.result->microMovesLeft : 0.0;
         double varTimeLeftPreSoftplus = buf.result->varTimeLeft;
         double shorttermWinlossErrorPreSoftplus = buf.result->shorttermWinlossError;
 
@@ -802,6 +810,8 @@ void NNEvaluator::evaluate(
 
         //Same multiplier as scoremean_multiplier in model_pytorch.py. Moves left can't be negative.
         movesLeft = std::max(0.0, movesLeftPreScaled * 20.0);
+        //Same multiplier as micromoves_multiplier in model_pytorch.py.
+        microMovesLeft = std::max(0.0, microMovesLeftPreScaled * 800.0);
         varTimeLeft = softPlus(varTimeLeftPreSoftplus) * 40.0;
 
 
@@ -815,6 +825,7 @@ void NNEvaluator::evaluate(
         if(
           !isfinite(probSum) ||
           !isfinite(movesLeftPreScaled) ||
+          !isfinite(microMovesLeftPreScaled) ||
           !isfinite(varTimeLeft) ||
           !isfinite(shorttermWinlossError) 
         ) {
@@ -839,6 +850,7 @@ void NNEvaluator::evaluate(
       }
 
       buf.result->movesLeft = (float)movesLeft;
+      buf.result->microMovesLeft = (float)microMovesLeft;
       if(modelVersion >= 9) {
         buf.result->varTimeLeft = (float)varTimeLeft;
         buf.result->shorttermWinlossError = (float)shorttermWinlossError;

@@ -249,6 +249,8 @@ ActivationLayerDesc::ActivationLayerDesc(istream& in, int version) {
       activation = ACTIVATION_RELU;
     else if(kind == "ACTIVATION_MISH")
       activation = ACTIVATION_MISH;
+    else if(kind == "ACTIVATION_SILU")
+      activation = ACTIVATION_SILU;
     else
       throw StringError(
         name + ": unknown activation " + kind
@@ -562,6 +564,256 @@ void NestedBottleneckResidualBlockDesc::iterConvLayers(std::function<void(const 
 }
 
 //-----------------------------------------------------------------------------
+// Transformer layers, ported from upstream KataGo
+
+RMSNormLayerDesc::RMSNormLayerDesc() : numChannels(0), epsilon(0), spatial(false) {}
+
+RMSNormLayerDesc::RMSNormLayerDesc(istream& in, bool binaryFloats) {
+  in >> name;
+  in >> numChannels;
+  in >> epsilon;
+  int spatialInt;
+  in >> spatialInt;
+  spatial = (spatialInt != 0);
+  int cgroupSize;
+  in >> cgroupSize;
+
+  if(in.fail())
+    throw StringError(name + ": rmsnorm layer failed to parse parameters");
+  if(!(epsilon > 0) || epsilon > 1.0f)
+    throw StringError(name + ": rmsnorm epsilon (" + Global::doubleToString(epsilon) + ") is not positive or is too large");
+  if(numChannels < 1)
+    throw StringError(name + ": rmsnorm numChannels (" + Global::intToString(numChannels) + ") < 1");
+  if(cgroupSize != 0)
+    throw StringError(name + ": rmsnorm cgroupSize (" + Global::intToString(cgroupSize) + ") != 0, grouped spatial RMSNorm is not supported");
+
+  readFloats(in, (size_t)numChannels, binaryFloats, name, gamma);
+  readFloats(in, (size_t)numChannels, binaryFloats, name, beta);
+
+  if(in.fail())
+    throw StringError(name + ": rmsnorm layer failed to parse gamma/beta weights");
+}
+
+RMSNormLayerDesc::RMSNormLayerDesc(RMSNormLayerDesc&& other) {
+  *this = std::move(other);
+}
+
+RMSNormLayerDesc& RMSNormLayerDesc::operator=(RMSNormLayerDesc&& other) {
+  name = std::move(other.name);
+  numChannels = other.numChannels;
+  epsilon = other.epsilon;
+  spatial = other.spatial;
+  gamma = std::move(other.gamma);
+  beta = std::move(other.beta);
+  return *this;
+}
+
+//-----------------------------------------------------------------------------
+
+TransformerRMSNormDesc::TransformerRMSNormDesc() : numChannels(0), epsilon(0) {}
+
+TransformerRMSNormDesc::TransformerRMSNormDesc(istream& in, bool binaryFloats) {
+  in >> name;
+  in >> numChannels;
+  in >> epsilon;
+
+  if(in.fail())
+    throw StringError(name + ": transformer rmsnorm failed to parse parameters");
+  if(numChannels < 1)
+    throw StringError(name + ": transformer rmsnorm numChannels (" + Global::intToString(numChannels) + ") < 1");
+  if(!(epsilon > 0) || epsilon > 1.0f)
+    throw StringError(name + ": transformer rmsnorm epsilon (" + Global::doubleToString(epsilon) + ") is not positive or is too large");
+
+  readFloats(in, (size_t)numChannels, binaryFloats, name, weight);
+
+  if(in.fail())
+    throw StringError(name + ": transformer rmsnorm failed to parse weights");
+}
+
+TransformerRMSNormDesc::TransformerRMSNormDesc(TransformerRMSNormDesc&& other) {
+  *this = std::move(other);
+}
+
+TransformerRMSNormDesc& TransformerRMSNormDesc::operator=(TransformerRMSNormDesc&& other) {
+  name = std::move(other.name);
+  numChannels = other.numChannels;
+  epsilon = other.epsilon;
+  weight = std::move(other.weight);
+  return *this;
+}
+
+//-----------------------------------------------------------------------------
+
+TransformerAttentionDesc::TransformerAttentionDesc()
+  : numHeads(0), numKVHeads(0), qHeadDim(0), vHeadDim(0)
+{}
+
+TransformerAttentionDesc::TransformerAttentionDesc(istream& in, bool binaryFloats) {
+  in >> name;
+  if(in.fail())
+    throw StringError(name + ": transformer attention block failed to parse name");
+
+  in >> numHeads;
+  in >> numKVHeads;
+  in >> qHeadDim;
+  in >> vHeadDim;
+  int useRopeInt, learnableRopeInt;
+  in >> useRopeInt;
+  in >> learnableRopeInt;
+
+  if(in.fail())
+    throw StringError(name + ": transformer attention block failed to parse header");
+  if(numHeads < 1 || numKVHeads < 1)
+    throw StringError(name + ": transformer attention numHeads and numKVHeads must be positive");
+  if(numHeads % numKVHeads != 0)
+    throw StringError(name + ": numHeads must be divisible by numKVHeads");
+  if(qHeadDim < 1 || vHeadDim < 1)
+    throw StringError(name + ": head dims must be positive");
+  if(useRopeInt == 0 || learnableRopeInt == 0)
+    throw StringError(name + ": only attention with learnable RoPE is supported");
+  //RoPE rotates interleaved channel pairs (2p, 2p+1)
+  if(qHeadDim % 2 != 0)
+    throw StringError(name + Global::strprintf(": qHeadDim (%d) must be even for RoPE", qHeadDim));
+
+  preLN = TransformerRMSNormDesc(in, binaryFloats);
+  qProj = MatMulLayerDesc(in, binaryFloats);
+  kProj = MatMulLayerDesc(in, binaryFloats);
+  vProj = MatMulLayerDesc(in, binaryFloats);
+  outProj = MatMulLayerDesc(in, binaryFloats);
+
+  if(qProj.inChannels != preLN.numChannels || kProj.inChannels != preLN.numChannels || vProj.inChannels != preLN.numChannels)
+    throw StringError(name + ": q/k/v projection input channels must match the norm channels");
+  if(qProj.outChannels != numHeads * qHeadDim)
+    throw StringError(name + Global::strprintf(": qProj.outChannels (%d) != numHeads*qHeadDim (%d)", qProj.outChannels, numHeads * qHeadDim));
+  if(kProj.outChannels != numKVHeads * qHeadDim)
+    throw StringError(name + Global::strprintf(": kProj.outChannels (%d) != numKVHeads*qHeadDim (%d)", kProj.outChannels, numKVHeads * qHeadDim));
+  if(vProj.outChannels != numKVHeads * vHeadDim)
+    throw StringError(name + Global::strprintf(": vProj.outChannels (%d) != numKVHeads*vHeadDim (%d)", vProj.outChannels, numKVHeads * vHeadDim));
+  if(outProj.inChannels != numHeads * vHeadDim)
+    throw StringError(name + Global::strprintf(": outProj.inChannels (%d) != numHeads*vHeadDim (%d)", outProj.inChannels, numHeads * vHeadDim));
+  if(outProj.outChannels != preLN.numChannels)
+    throw StringError(name + ": outProj.outChannels must match the norm channels");
+
+  string ropeFreqsName;
+  int ropeNumKVHeads, ropeNumPairs, ropeDim2;
+  in >> ropeFreqsName;
+  in >> ropeNumKVHeads;
+  in >> ropeNumPairs;
+  in >> ropeDim2;
+  if(in.fail())
+    throw StringError(name + ": failed to parse learnable rope freq header");
+  if(ropeNumKVHeads != numKVHeads)
+    throw StringError(name + Global::strprintf(": ropeNumKVHeads (%d) != numKVHeads (%d)", ropeNumKVHeads, numKVHeads));
+  if(ropeNumPairs != qHeadDim / 2)
+    throw StringError(name + Global::strprintf(": ropeNumPairs (%d) != qHeadDim/2 (%d)", ropeNumPairs, qHeadDim / 2));
+  if(ropeDim2 != 2)
+    throw StringError(name + ": rope freq dim2 must be 2");
+  readFloats(in, (size_t)numKVHeads * ropeNumPairs * 2, binaryFloats, name, ropeFreqs);
+
+  if(in.fail())
+    throw StringError(name + ": transformer attention block parse failure (istream fail() return true)");
+}
+
+TransformerAttentionDesc::TransformerAttentionDesc(TransformerAttentionDesc&& other) {
+  *this = std::move(other);
+}
+
+TransformerAttentionDesc& TransformerAttentionDesc::operator=(TransformerAttentionDesc&& other) {
+  name = std::move(other.name);
+  numHeads = other.numHeads;
+  numKVHeads = other.numKVHeads;
+  qHeadDim = other.qHeadDim;
+  vHeadDim = other.vHeadDim;
+  preLN = std::move(other.preLN);
+  qProj = std::move(other.qProj);
+  kProj = std::move(other.kProj);
+  vProj = std::move(other.vProj);
+  outProj = std::move(other.outProj);
+  ropeFreqs = std::move(other.ropeFreqs);
+  return *this;
+}
+
+void TransformerAttentionDesc::computeRopeCosSin(
+  int nnXLen, int nnYLen, int paddedNNXYLen, std::vector<float>& cosTable, std::vector<float>& sinTable
+) const {
+  int numPairs = qHeadDim / 2;
+  if(ropeFreqs.size() != (size_t)(numKVHeads * numPairs * 2) || paddedNNXYLen < nnXLen * nnYLen)
+    throw StringError(name + ": computeRopeCosSin called with inconsistent sizes");
+  cosTable.assign((size_t)numKVHeads * numPairs * paddedNNXYLen, 0.0f);
+  sinTable.assign((size_t)numKVHeads * numPairs * paddedNNXYLen, 0.0f);
+  for(int h = 0; h < numKVHeads; h++) {
+    for(int p = 0; p < numPairs; p++) {
+      float freqX = ropeFreqs[(h * numPairs + p) * 2 + 0];
+      float freqY = ropeFreqs[(h * numPairs + p) * 2 + 1];
+      for(int y = 0; y < nnYLen; y++) {
+        for(int x = 0; x < nnXLen; x++) {
+          float angle = (float)x * freqX + (float)y * freqY;
+          size_t idx = (size_t)(h * numPairs + p) * paddedNNXYLen + y * nnXLen + x;
+          cosTable[idx] = cosf(angle);
+          sinTable[idx] = sinf(angle);
+        }
+      }
+    }
+  }
+}
+
+//-----------------------------------------------------------------------------
+
+TransformerFFNDesc::TransformerFFNDesc() : numChannels(0), ffnChannels(0) {}
+
+TransformerFFNDesc::TransformerFFNDesc(istream& in, bool binaryFloats) {
+  in >> name;
+  if(in.fail())
+    throw StringError(name + ": transformer ffn block failed to parse name");
+
+  in >> numChannels;
+  in >> ffnChannels;
+  int useSwiGLUInt;
+  in >> useSwiGLUInt;
+
+  if(in.fail())
+    throw StringError(name + ": transformer ffn block failed to parse header");
+  if(numChannels < 1 || ffnChannels < 1)
+    throw StringError(name + ": transformer ffn channels must be positive");
+  if(useSwiGLUInt == 0)
+    throw StringError(name + ": only SwiGLU transformer ffn blocks are supported");
+
+  preLN = TransformerRMSNormDesc(in, binaryFloats);
+  linear1 = MatMulLayerDesc(in, binaryFloats);
+  linearGate = MatMulLayerDesc(in, binaryFloats);
+  linear2 = MatMulLayerDesc(in, binaryFloats);
+
+  if(preLN.numChannels != numChannels)
+    throw StringError(name + Global::strprintf(": preLN.numChannels (%d) != numChannels (%d)", preLN.numChannels, numChannels));
+  if(linear1.inChannels != numChannels || linearGate.inChannels != numChannels)
+    throw StringError(name + Global::strprintf(": linear1/linearGate inChannels != numChannels (%d)", numChannels));
+  if(linear1.outChannels != ffnChannels || linearGate.outChannels != ffnChannels)
+    throw StringError(name + Global::strprintf(": linear1/linearGate outChannels != ffnChannels (%d)", ffnChannels));
+  if(linear2.inChannels != ffnChannels)
+    throw StringError(name + Global::strprintf(": linear2.inChannels (%d) != ffnChannels (%d)", linear2.inChannels, ffnChannels));
+  if(linear2.outChannels != numChannels)
+    throw StringError(name + Global::strprintf(": linear2.outChannels (%d) != numChannels (%d)", linear2.outChannels, numChannels));
+
+  if(in.fail())
+    throw StringError(name + ": transformer ffn block parse failure (istream fail() return true)");
+}
+
+TransformerFFNDesc::TransformerFFNDesc(TransformerFFNDesc&& other) {
+  *this = std::move(other);
+}
+
+TransformerFFNDesc& TransformerFFNDesc::operator=(TransformerFFNDesc&& other) {
+  name = std::move(other.name);
+  numChannels = other.numChannels;
+  ffnChannels = other.ffnChannels;
+  preLN = std::move(other.preLN);
+  linear1 = std::move(other.linear1);
+  linearGate = std::move(other.linearGate);
+  linear2 = std::move(other.linear2);
+  return *this;
+}
+
+//-----------------------------------------------------------------------------
 
 static void parseResidualBlockStack(
   std::istream& in,
@@ -640,6 +892,30 @@ static void parseResidualBlockStack(
 
       blocks.push_back(make_pair(NESTED_BOTTLENECK_BLOCK_KIND, std::move(descPtr)));
     }
+    else if(kind == "transformer_attention_block") {
+      unique_ptr_void descPtr = make_unique_void(new TransformerAttentionDesc(in, binaryFloats));
+      TransformerAttentionDesc& desc = *((TransformerAttentionDesc*)descPtr.get());
+      if(desc.preLN.numChannels != trunkNumChannels)
+        throw StringError(
+          name + Global::strprintf(
+                   ": %s numChannels (%d) != trunkNumChannels (%d)",
+                   desc.name.c_str(),
+                   desc.preLN.numChannels,
+                   trunkNumChannels));
+      blocks.push_back(make_pair(TRANSFORMER_ATTENTION_BLOCK_KIND, std::move(descPtr)));
+    }
+    else if(kind == "transformer_ffn_block") {
+      unique_ptr_void descPtr = make_unique_void(new TransformerFFNDesc(in, binaryFloats));
+      TransformerFFNDesc& desc = *((TransformerFFNDesc*)descPtr.get());
+      if(desc.numChannels != trunkNumChannels)
+        throw StringError(
+          name + Global::strprintf(
+                   ": %s numChannels (%d) != trunkNumChannels (%d)",
+                   desc.name.c_str(),
+                   desc.numChannels,
+                   trunkNumChannels));
+      blocks.push_back(make_pair(TRANSFORMER_FFN_BLOCK_KIND, std::move(descPtr)));
+    }
     else
       throw StringError(name + ": found unknown block kind: " + kind);
 
@@ -657,7 +933,8 @@ TrunkDesc::TrunkDesc()
     trunkNumChannels(0),
     midNumChannels(0),
     regularNumChannels(0),
-    gpoolNumChannels(0) {}
+    gpoolNumChannels(0),
+    trunkNormKind(TRUNK_NORM_KIND_STANDARD) {}
 
 TrunkDesc::TrunkDesc(istream& in, int vrsn, bool binaryFloats) {
   in >> name;
@@ -669,9 +946,14 @@ TrunkDesc::TrunkDesc(istream& in, int vrsn, bool binaryFloats) {
   int dilatedNumChannels; //unused
   in >> dilatedNumChannels;
   in >> gpoolNumChannels;
+  trunkNormKind = TRUNK_NORM_KIND_STANDARD;
+  if(version >= 104 && version <= 199)
+    in >> trunkNormKind;
 
   if(in.fail())
     throw StringError(name + ": trunk failed to parse num blocks or various channel parameters");
+  if(trunkNormKind != TRUNK_NORM_KIND_STANDARD && trunkNormKind != TRUNK_NORM_KIND_RMSNORM)
+    throw StringError(name + ": unknown trunk norm kind " + Global::intToString(trunkNormKind));
   if(numBlocks < 1)
     throw StringError(name + ": trunk num blocks must be positive");
   if(
@@ -699,13 +981,21 @@ TrunkDesc::TrunkDesc(istream& in, int vrsn, bool binaryFloats) {
 
   parseResidualBlockStack(in, version, binaryFloats, name, numBlocks, trunkNumChannels, blocks);
 
-  trunkTipBN = BatchNormLayerDesc(in,binaryFloats);
+  int trunkTipChannels;
+  if(trunkNormKind == TRUNK_NORM_KIND_RMSNORM) {
+    trunkTipRMSNorm = RMSNormLayerDesc(in,binaryFloats);
+    trunkTipChannels = trunkTipRMSNorm.numChannels;
+  }
+  else {
+    trunkTipBN = BatchNormLayerDesc(in,binaryFloats);
+    trunkTipChannels = trunkTipBN.numChannels;
+  }
   trunkTipActivation = ActivationLayerDesc(in,version);
 
-  if(trunkTipBN.numChannels != trunkNumChannels)
+  if(trunkTipChannels != trunkNumChannels)
     throw StringError(
       name + Global::strprintf(
-               ": trunkTipBN.numChannels (%d) != trunkNumChannels (%d)", trunkTipBN.numChannels, trunkNumChannels));
+               ": trunk tip numChannels (%d) != trunkNumChannels (%d)", trunkTipChannels, trunkNumChannels));
 
   if(in.fail())
     throw StringError(name + ": trunk istream fail after parsing tip");
@@ -725,7 +1015,9 @@ TrunkDesc::TrunkDesc(TrunkDesc&& other) {
   initialConv = std::move(other.initialConv);
   initialMatMul = std::move(other.initialMatMul);
   blocks = std::move(other.blocks);
+  trunkNormKind = other.trunkNormKind;
   trunkTipBN = std::move(other.trunkTipBN);
+  trunkTipRMSNorm = std::move(other.trunkTipRMSNorm);
   trunkTipActivation = std::move(other.trunkTipActivation);
 }
 
@@ -740,7 +1032,9 @@ TrunkDesc& TrunkDesc::operator=(TrunkDesc&& other) {
   initialConv = std::move(other.initialConv);
   initialMatMul = std::move(other.initialMatMul);
   blocks = std::move(other.blocks);
+  trunkNormKind = other.trunkNormKind;
   trunkTipBN = std::move(other.trunkTipBN);
+  trunkTipRMSNorm = std::move(other.trunkTipRMSNorm);
   trunkTipActivation = std::move(other.trunkTipActivation);
   return *this;
 }
@@ -761,6 +1055,23 @@ void TrunkDesc::iterConvLayers(std::function<void(const ConvLayerDesc& desc)> f)
       desc->iterConvLayers(f);
     }
   }
+}
+
+static bool blockStackHasTransformer(const std::vector<std::pair<int, unique_ptr_void>>& blocks) {
+  for(const auto& block: blocks) {
+    if(block.first == TRANSFORMER_ATTENTION_BLOCK_KIND || block.first == TRANSFORMER_FFN_BLOCK_KIND)
+      return true;
+    if(block.first == NESTED_BOTTLENECK_BLOCK_KIND) {
+      const NestedBottleneckResidualBlockDesc* desc = (const NestedBottleneckResidualBlockDesc*)block.second.get();
+      if(blockStackHasTransformer(desc->blocks))
+        return true;
+    }
+  }
+  return false;
+}
+
+bool TrunkDesc::hasAnyTransformerBlocks() const {
+  return blockStackHasTransformer(blocks);
 }
 
 //-----------------------------------------------------------------------------
@@ -1156,10 +1467,10 @@ void ModelDesc::loadFromFileMaybeGZipped(const string& fileName, ModelDesc& desc
 
 
 Rules ModelDesc::getSupportedRules(const Rules& desiredRules, bool& supported) const {
-  static_assert(NNModelVersion::latestModelVersionImplemented == 103, "");
+  static_assert(NNModelVersion::latestModelVersionImplemented == 104, "");
   Rules rules = desiredRules;
   supported = true;
-  if(version <= 103) {
+  if(version <= 104) {
   }
   else {
     ASSERT_UNREACHABLE;

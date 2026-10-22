@@ -2,6 +2,7 @@
 //Run with: katago runinfluencetests
 
 #include <algorithm>
+#include <cmath>
 #include <sstream>
 #include <vector>
 
@@ -320,10 +321,15 @@ static void testRandomGames(Rand& rand, bool print) {
   cout << "random games ok, " << totalMoves << " moves" << endl;
 }
 
+typedef void (*FillRowFunc)(
+  const Board&, const BoardHistory&, Player, const MiscNNInputParams&, int, int, bool, float*, float*);
+
 //The NN symmetry applied to the input tensor must equal the input features of the symmetric board.
-static void testNNInputSymmetry(Rand& rand) {
-  const int nSpatial = NNInputs::NUM_FEATURES_SPATIAL_V102;
-  const int nGlobal = NNInputs::NUM_FEATURES_GLOBAL_V102;
+static void testNNInputSymmetry(Rand& rand, FillRowFunc fillRow) {
+  static_assert(NNInputs::NUM_FEATURES_SPATIAL_V102 == NNInputs::NUM_FEATURES_SPATIAL_V103, "");
+  static_assert(NNInputs::NUM_FEATURES_GLOBAL_V102 == NNInputs::NUM_FEATURES_GLOBAL_V103, "");
+  const int nSpatial = NNInputs::NUM_FEATURES_SPATIAL_V103;
+  const int nGlobal = NNInputs::NUM_FEATURES_GLOBAL_V103;
   for(int game = 0; game < 20; game++) {
     int size = 4 + rand.nextUInt(7);
     int nnLen = size + (game % 2 == 0 ? 0 : 3);
@@ -340,7 +346,7 @@ static void testNNInputSymmetry(Rand& rand) {
         vector<float> bin(nSpatial * nnLen * nnLen);
         vector<float> glob(nGlobal);
         MiscNNInputParams params;
-        NNInputs::fillRowV102(board, hist, board.nextPla, params, nnLen, nnLen, useNHWC, bin.data(), glob.data());
+        fillRow(board, hist, board.nextPla, params, nnLen, nnLen, useNHWC, bin.data(), glob.data());
         for(int s = 0; s < SymmetryHelpers::NUM_SYMMETRIES; s++) {
           if(nnLen != size && s != 0)
             continue; //Rotating a padded tensor moves the board away from the corner, can't compare directly
@@ -348,7 +354,7 @@ static void testNNInputSymmetry(Rand& rand) {
           BoardHistory symHist(symBoard, symBoard.nextPla, rules);
           vector<float> symBin(nSpatial * nnLen * nnLen);
           vector<float> symGlob(nGlobal);
-          NNInputs::fillRowV102(symBoard, symHist, symBoard.nextPla, params, nnLen, nnLen, useNHWC, symBin.data(), symGlob.data());
+          fillRow(symBoard, symHist, symBoard.nextPla, params, nnLen, nnLen, useNHWC, symBin.data(), symGlob.data());
           vector<float> transformed(nSpatial * nnLen * nnLen);
           SymmetryHelpers::copyInputsWithSymmetry(bin.data(), transformed.data(), 1, nnLen, nnLen, nSpatial, useNHWC, s);
           for(size_t i = 0; i < transformed.size(); i++)
@@ -377,6 +383,110 @@ static void testNNInputSymmetry(Rand& rand) {
     }
   }
   cout << "nn input symmetry ok" << endl;
+}
+
+static void fillV103(const Board& board, const BoardHistory& hist, vector<float>& bin, vector<float>& glob) {
+  bin.assign(NNInputs::NUM_FEATURES_SPATIAL_V103 * board.x_size * board.y_size, 0.0f);
+  glob.assign(NNInputs::NUM_FEATURES_GLOBAL_V103, 0.0f);
+  MiscNNInputParams params;
+  NNInputs::fillRowV103(board, hist, board.nextPla, params, board.x_size, board.y_size, false, bin.data(), glob.data());
+}
+
+//Checks the globals that V103 adds on top of V102 (see the layout above fillRowV102 in nninputs.cpp)
+static void checkV103Globals(
+  const vector<float>& glob, int expectedBucket, float expectedRatio, bool expectedCanAttack, bool expectedForbidPass
+) {
+  for(int i = 0; i < NNInputs::V103_NUM_POINTS_LEFT_BUCKETS; i++)
+    testAssert(glob[NNInputs::V103_POINTS_LEFT_START + i] == (i == expectedBucket ? 1.0f : 0.0f));
+  testAssert(std::fabs(glob[NNInputs::V103_VALUE_RATIO] - expectedRatio) < 1e-6);
+  testAssert(glob[NNInputs::V103_CAN_ATTACK] == (expectedCanAttack ? 1.0f : 0.0f));
+  for(int i = 0; i < NNInputs::NUM_RULE_FEATURES; i++)
+    testAssert(glob[NNInputs::RULE_FEATURES_START + i] == (i == 0 && expectedForbidPass ? 1.0f : 0.0f));
+  for(int i = NNInputs::RULE_FEATURES_START + NNInputs::NUM_RULE_FEATURES; i < NNInputs::NUM_FEATURES_GLOBAL_V103; i++)
+    testAssert(glob[i] == 0.0f);
+}
+
+static void testNNInputsV103() {
+  //Bucket edges: exact counts up to 8, then ranges ending at 10, 12, 14, 16, 24, 32, 64, and everything above
+  const int pointsAndBuckets[][2] = {
+    {1, 0}, {2, 1}, {8, 7}, {9, 8}, {10, 8}, {11, 9}, {12, 9}, {16, 11}, {17, 12}, {24, 12},
+    {25, 13}, {32, 13}, {33, 14}, {64, 14}, {65, 15}, {1000, 15}
+  };
+  for(const auto& pb: pointsAndBuckets)
+    testAssert(NNInputs::getPointsLeftBucket(pb[0]) == pb[1]);
+
+  vector<float> bin, glob, bin102, glob102;
+  Rules rules(0);
+  Rules forbidPassRules(0);
+  forbidPassRules.forbidPassUnlessNoOtherMove = true;
+
+  //Attack select with an attack available: value ratio own/opp, attack flag on
+  {
+    Board board = Board::parseBoard(4, 1, "+5 . . -7");
+    BoardHistory hist(board, P_WHITE, rules);
+    fillV103(board, hist, bin, glob);
+    checkV103Globals(glob, -1, 5.0f / 7.0f, true, false);
+    //Everything else matches V102
+    bin102.assign(bin.size(), 0.0f);
+    glob102.assign(glob.size(), 0.0f);
+    MiscNNInputParams params;
+    NNInputs::fillRowV102(board, hist, board.nextPla, params, 4, 1, false, bin102.data(), glob102.data());
+    testAssert(bin == bin102);
+    for(int i = 0; i < NNInputs::V103_POINTS_LEFT_START; i++)
+      testAssert(glob[i] == glob102[i]);
+    for(int i = NNInputs::V103_POINTS_LEFT_START; i < NNInputs::NUM_FEATURES_GLOBAL_V102; i++)
+      testAssert(glob102[i] == 0.0f);
+
+    //Same position from Black's side, with the rule flag
+    Board boardB = board;
+    testAssert(boardB.setTurnState(P_BLACK, Board::STAGE_ATTACK_SELECT, Board::NULL_LOC, 0, 0));
+    BoardHistory histB(boardB, P_BLACK, forbidPassRules);
+    fillV103(boardB, histB, bin, glob);
+    checkV103Globals(glob, -1, 7.0f / 5.0f, true, true);
+  }
+  //Attack select with no attacker (strength 1): only pass is legal, flag off
+  {
+    Board board = Board::parseBoard(3, 1, "+1 . -7");
+    BoardHistory hist(board, P_WHITE, rules);
+    fillV103(board, hist, bin, glob);
+    checkV103Globals(glob, -1, 1.0f / 7.0f, false, false);
+  }
+  //Attack target: always a legal target
+  {
+    Board board = Board::parseBoard(3, 1, "+5 . -7");
+    BoardHistory hist(board, P_WHITE, rules);
+    play(board, hist, L(board, 0, 0));
+    testAssert(board.stage == Board::STAGE_ATTACK_TARGET);
+    fillV103(board, hist, bin, glob);
+    checkV103Globals(glob, -1, 5.0f / 7.0f, true, false);
+  }
+  //Opponent with no value: the ratio uses 1, and it is capped at 32
+  {
+    Board board = Board::parseBoard(3, 1, "+5 . .");
+    BoardHistory hist(board, P_WHITE, rules);
+    fillV103(board, hist, bin, glob);
+    checkV103Globals(glob, -1, 5.0f, true, false);
+    Board board2 = Board::parseBoard(6, 1, "+8 +8 +8 +8 +8 -1");
+    BoardHistory hist2(board2, P_WHITE, rules);
+    fillV103(board2, hist2, bin, glob);
+    checkV103Globals(glob, -1, NNInputs::V103_MAX_VALUE_RATIO, true, false);
+  }
+  //Reinforce: one-hot of the points left, value ratio counts the points as already spent, no attack flag
+  {
+    //10 own cells at strength 1 = capacity 70, own value 10, opp value 7
+    Board base = Board::parseBoard(6, 2, "+1 +1 +1 +1 +1 +1 / +1 +1 +1 +1 . -7", '/');
+    for(const auto& pb: pointsAndBuckets) {
+      int points = pb[0];
+      if(points >= 70)
+        continue;
+      Board board = base;
+      testAssert(board.setTurnState(P_WHITE, Board::STAGE_REINFORCE, Board::NULL_LOC, points, 3));
+      BoardHistory hist(board, P_WHITE, forbidPassRules);
+      fillV103(board, hist, bin, glob);
+      checkV103Globals(glob, pb[1], (10.0f + points) / 7.0f, false, true);
+    }
+  }
+  cout << "nn inputs v103 ok" << endl;
 }
 
 static void testGraphHashTranspositions() {
@@ -414,7 +524,9 @@ int MainCmds::runinfluencetests(const vector<string>& args) {
   testMoveLimit();
   testGraphHashTranspositions();
   testRandomGames(rand, print);
-  testNNInputSymmetry(rand);
+  testNNInputSymmetry(rand, &NNInputs::fillRowV102);
+  testNNInputSymmetry(rand, &NNInputs::fillRowV103);
+  testNNInputsV103();
   cout << "All influence tests passed" << endl;
   return 0;
 }

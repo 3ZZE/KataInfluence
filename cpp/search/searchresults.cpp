@@ -1237,6 +1237,7 @@ bool Search::getAnalysisJson(
         rootInfo["rawStWrError"] = Global::roundDynamic(nnOutput->shorttermWinlossError * 0.5,OUTPUT_PRECISION);
         rootInfo["rawVarTimeLeft"] = Global::roundDynamic(nnOutput->varTimeLeft,OUTPUT_PRECISION);
         rootInfo["rawMovesLeft"] = Global::roundDynamic(nnOutput->movesLeft,OUTPUT_PRECISION);
+        rootInfo["rawMicroMovesLeft"] = Global::roundDynamic(nnOutput->microMovesLeft,OUTPUT_PRECISION);
       }
     }
 
